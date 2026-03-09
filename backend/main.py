@@ -121,11 +121,26 @@ class EEGServer:
             if self._recording:
                 filepath = self._save_recording()
                 self._recording = False
+                self._last_saved_path = filepath
                 log.info("Recording stopped — saved to %s", filepath)
                 await self._broadcast_text(json.dumps({
                     "type": "recording_saved",
                     "filepath": str(filepath),
                     "label": self._recording_label,
+                }))
+        elif action == "discard_last_recording":
+            path = getattr(self, '_last_saved_path', None)
+            if path and Path(path).exists():
+                # Delete .npz and associated .fif files
+                stem = Path(path).stem
+                parent = Path(path).parent
+                for f in parent.glob(f"{stem}*"):
+                    f.unlink()
+                    log.info("Discarded recording: %s", f)
+                self._last_saved_path = None
+                await self._broadcast_text(json.dumps({
+                    "type": "recording_discarded",
+                    "filepath": str(path),
                 }))
 
     def _save_recording(self) -> Path:

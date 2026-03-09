@@ -12,7 +12,7 @@ interface Protocol {
 
 const PROTOCOLS: Protocol[] = [
   { label: "baseline",     trialDuration: 60, cueAt: 0,  reps: 30, restBetween: 1, instruction: "Work normally — 30min continuous capture" },
-  { label: "rest",         trialDuration: 5, cueAt: 0,   reps: 10, restBetween: 2, instruction: "Relax, do nothing" },
+  { label: "rest",         trialDuration: 5, cueAt: 0,   reps: 5,  restBetween: 2, instruction: "Relax, do nothing" },
   { label: "single_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Blink once at the cue" },
   { label: "double_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Double blink at the cue" },
   { label: "triple_blink", trialDuration: 4, cueAt: 1,   reps: 20, restBetween: 2.5, instruction: "Triple blink at the cue" },
@@ -26,7 +26,7 @@ type SessionState =
   | { phase: "idle" }
   | { phase: "countdown"; secondsLeft: number }
   | { phase: "recording"; trialNum: number; elapsed: number; cued: boolean }
-  | { phase: "rest"; trialNum: number; secondsLeft: number }
+  | { phase: "rest"; trialNum: number; secondsLeft: number; canDiscard: boolean }
   | { phase: "done"; totalTrials: number };
 
 interface Props {
@@ -55,6 +55,7 @@ function playBeep(freq: number = 880, durationMs: number = 100) {
 export function RecordingPanel({ isConnected, sendCommand }: Props) {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [state, setState] = useState<SessionState>({ phase: "idle" });
+  const [discardedCount, setDiscardedCount] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const trialStartRef = useRef(0);
   const abortRef = useRef(false);
@@ -134,7 +135,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
         if (abortRef.current) { resolve(); return; }
 
         let remaining = proto.restBetween;
-        setState({ phase: "rest", trialNum, secondsLeft: remaining });
+        setState({ phase: "rest", trialNum, secondsLeft: remaining, canDiscard: true });
 
         timerRef.current = setInterval(() => {
           if (abortRef.current) { cleanup(); resolve(); return; }
@@ -143,7 +144,11 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
             cleanup();
             resolve();
           } else {
-            setState({ phase: "rest", trialNum, secondsLeft: remaining });
+            setState((prev) =>
+              prev.phase === "rest"
+                ? { ...prev, secondsLeft: remaining }
+                : prev,
+            );
           }
         }, 100);
       });
@@ -151,9 +156,19 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     [cleanup],
   );
 
+  // Discard previous trial
+  const discardLastTrial = useCallback(() => {
+    sendCommand({ cmd: "discard_last_recording" });
+    setDiscardedCount((c) => c + 1);
+    setState((prev) =>
+      prev.phase === "rest" ? { ...prev, canDiscard: false } : prev,
+    );
+  }, [sendCommand]);
+
   // Run full session
   const startSession = useCallback(async () => {
     abortRef.current = false;
+    setDiscardedCount(0);
     const proto = PROTOCOLS[selectedIdx];
     // Generate a session ID so multiple runs of the same protocol don't collide
     const sessionId = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
@@ -283,13 +298,27 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>
             Rest · trial {state.trialNum}/{protocol.reps} done · next in {Math.ceil(state.secondsLeft)}s
           </span>
+          {state.canDiscard && (
+            <button
+              onClick={discardLastTrial}
+              className="px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider border transition-colors"
+              style={{
+                background: "transparent",
+                borderColor: "var(--status-bad)",
+                color: "var(--status-bad)",
+              }}
+            >
+              DISCARD TRIAL
+            </button>
+          )}
         </div>
       )}
 
       {state.phase === "done" && (
         <div className="mb-3 flex items-center gap-3">
           <span className="text-sm font-mono" style={{ color: "var(--status-good)" }}>
-            Done — {state.totalTrials} trials saved to recordings/{protocol.label}/
+            Done — {state.totalTrials - discardedCount} trials saved to recordings/{protocol.label}/
+            {discardedCount > 0 && ` (${discardedCount} discarded)`}
           </span>
         </div>
       )}
