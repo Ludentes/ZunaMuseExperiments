@@ -11,11 +11,14 @@ interface Protocol {
 }
 
 const PROTOCOLS: Protocol[] = [
+  { label: "baseline",     trialDuration: 60, cueAt: 0,  reps: 30, restBetween: 1, instruction: "Work normally — 30min continuous capture" },
   { label: "rest",         trialDuration: 5, cueAt: 0,   reps: 10, restBetween: 2, instruction: "Relax, do nothing" },
   { label: "single_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Blink once at the cue" },
   { label: "double_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Double blink at the cue" },
   { label: "triple_blink", trialDuration: 4, cueAt: 1,   reps: 20, restBetween: 2.5, instruction: "Triple blink at the cue" },
   { label: "clench",       trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Clench jaw briefly at the cue" },
+  { label: "eyebrow_raise",trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Raise both eyebrows at the cue" },
+  { label: "eyebrow_furrow",trialDuration: 3, cueAt: 1,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
   { label: "talk",         trialDuration: 5, cueAt: 0.5, reps: 10, restBetween: 2, instruction: "Say any word at the cue" },
 ];
 

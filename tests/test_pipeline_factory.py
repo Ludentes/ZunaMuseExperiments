@@ -9,5 +9,5 @@ def test_create_default_pipeline():
     slow_stages = [s for s in pipeline.stages if s.cadence == Cadence.SLOW]
     fast_stages = [s for s in pipeline.stages if s.cadence == Cadence.FAST]
     assert len(slow_stages) >= 4  # bandpass, bandpower, signal_quality, head_motion
-    assert len(fast_stages) >= 2  # blink, clench
+    assert len(fast_stages) >= 2  # speech_detector, blink_detector
     assert len(pipeline.actions) >= 1  # at least LogAction
