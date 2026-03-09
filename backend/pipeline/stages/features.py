@@ -226,3 +226,82 @@ class HeadMotionExtractor(Stage):
             head_pose=(pitch, roll),
             motion_artifact=movement > 0.05,
         ))
+
+
+@dataclass
+class ConcentrationResult:
+    concentration_score: float   # 0.0 - 1.0 (from MINDFULNESS model)
+    relaxation_score: float      # 0.0 - 1.0 (from RESTFULNESS model)
+
+
+class ConcentrationScorer(Stage):
+    name = "concentration_scorer"
+    cadence = Cadence.SLOW
+
+    def __init__(self):
+        from brainflow.ml_model import MLModel, BrainFlowModelParams, BrainFlowMetrics, BrainFlowClassifiers
+        mind_params = BrainFlowModelParams(BrainFlowMetrics.MINDFULNESS, BrainFlowClassifiers.DEFAULT_CLASSIFIER)
+        rest_params = BrainFlowModelParams(BrainFlowMetrics.RESTFULNESS, BrainFlowClassifiers.DEFAULT_CLASSIFIER)
+        self._mindfulness = MLModel(mind_params)
+        self._restfulness = MLModel(rest_params)
+        # BrainFlow MLModel is process-global; release first to avoid
+        # ANOTHER_CLASSIFIER_IS_PREPARED_ERROR when re-creating the stage.
+        try:
+            self._mindfulness.release()
+        except Exception:
+            pass
+        self._mindfulness.prepare()
+        try:
+            self._restfulness.release()
+        except Exception:
+            pass
+        self._restfulness.prepare()
+
+    def release(self):
+        """Release BrainFlow ML models (call on shutdown)."""
+        try:
+            self._mindfulness.release()
+        except Exception:
+            pass
+        try:
+            self._restfulness.release()
+        except Exception:
+            pass
+
+    def process(self, frame: PipelineFrame) -> None:
+        bp = frame.get(BandPowerResult)
+        if bp is None:
+            return
+
+        # MLModel expects normalized band powers as input
+        # get_custom_band_powers returns relative powers, but we have absolute
+        # Use our band powers and normalize them
+        band_names_ordered = ["delta", "theta", "alpha", "beta", "gamma"]
+        total = 0.0
+        sums = []
+        for b in band_names_ordered:
+            s = sum(bp.band_powers.get(b, [0.0]))
+            sums.append(s)
+            total += s
+
+        if total <= 0:
+            return
+
+        features = np.array([s / total for s in sums], dtype=np.float64)
+
+        try:
+            result = self._mindfulness.predict(features)
+            concentration = float(result.item() if hasattr(result, 'item') else result)
+        except Exception:
+            concentration = 0.0
+
+        try:
+            result = self._restfulness.predict(features)
+            relaxation = float(result.item() if hasattr(result, 'item') else result)
+        except Exception:
+            relaxation = 0.0
+
+        frame.set(ConcentrationResult(
+            concentration_score=round(concentration, 3),
+            relaxation_score=round(relaxation, 3),
+        ))

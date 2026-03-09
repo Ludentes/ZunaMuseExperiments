@@ -10,24 +10,26 @@ from backend.pipeline.base import Pipeline
 from backend.pipeline.stages.detectors import BlinkDetector, ClenchDetector
 from backend.pipeline.stages.features import (
     BandPowerExtractor,
+    ConcentrationScorer,
     HeadMotionExtractor,
     HeartRateExtractor,
     SignalQualityChecker,
 )
-from backend.pipeline.stages.preprocessing import BandPassFilter
+from backend.pipeline.stages.preprocessing import WaveletDenoiser
 
 
 def create_default_pipeline() -> Pipeline:
     stages = [
         # SLOW — spectral features, vitals
-        BandPassFilter(lowcut=1.0, highcut=45.0),
+        WaveletDenoiser(),
         BandPowerExtractor(),
         SignalQualityChecker(),
         HeartRateExtractor(),
         HeadMotionExtractor(),
-        # FAST — event detection
-        BlinkDetector(),
-        ClenchDetector(),
+        ConcentrationScorer(),
+        # FAST — event detection (disabled: needs tuning, floods event loop)
+        # BlinkDetector(),
+        # ClenchDetector(),
     ]
     actions = [
         LogAction(),

@@ -9,6 +9,7 @@ from __future__ import annotations
 from backend.pipeline.stages.detectors import ClenchResult
 from backend.pipeline.stages.features import (
     BandPowerResult,
+    ConcentrationResult,
     HeadMotionResult,
     HeartRateResult,
     SignalQualityResult,
@@ -38,6 +39,13 @@ def frame_to_metrics(frame: PipelineFrame) -> dict:
             "heart_rate_bpm": hr.heart_rate_bpm,
             "spo2_percent": hr.spo2_percent,
             "hrv_rmssd_ms": hr.hrv_rmssd_ms,
+        }
+
+    cr = frame.get(ConcentrationResult)
+    if cr:
+        metrics["brain"] = {
+            "concentration": cr.concentration_score,
+            "relaxation": cr.relaxation_score,
         }
 
     hm = frame.get(HeadMotionResult)

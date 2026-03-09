@@ -142,3 +142,20 @@ def test_head_motion_skips_single_sample():
     frame = PipelineFrame(eeg=None, ppg=None, imu=imu, timestamp=0.0)
     HeadMotionExtractor().process(frame)
     assert frame.get(HeadMotionResult) is None
+
+
+def test_concentration_scorer():
+    frame = _make_eeg_frame(512)
+    from backend.pipeline.stages.features import ConcentrationScorer, ConcentrationResult
+    from backend.pipeline.stages.features import BandPowerExtractor
+    # Need band powers first
+    BandPowerExtractor().process(frame)
+    scorer = ConcentrationScorer()
+    try:
+        scorer.process(frame)
+        cr = frame.get(ConcentrationResult)
+        assert cr is not None
+        assert 0.0 <= cr.concentration_score <= 1.0
+        assert 0.0 <= cr.relaxation_score <= 1.0
+    finally:
+        scorer.release()
