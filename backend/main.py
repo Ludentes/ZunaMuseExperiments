@@ -227,12 +227,42 @@ class EEGServer:
         websockets.broadcast(self.clients, data)
 
     async def _stream_loop(self):
-        """Poll BrainFlow and broadcast binary frames at ~60fps."""
+        """Poll BrainFlow and broadcast binary frames at ~60fps.
+
+        Monitors stream health and triggers reconnection if data stops arriving.
+        """
         interval = self.config.server.eeg_batch_interval
+        watchdog_check_interval = 5.0  # check stream health every 5s
+        last_watchdog = time.time()
+
         while self._running:
             if self.acq is None:
                 await asyncio.sleep(interval)
                 continue
+
+            # Watchdog: detect stream drops and attempt reconnect
+            now = time.time()
+            if now - last_watchdog > watchdog_check_interval:
+                last_watchdog = now
+                if self.acq.is_streaming and not self.acq.stream_healthy:
+                    log.warning("Stream watchdog: no data for %.1fs — reconnecting",
+                                self.acq.seconds_since_last_data)
+                    await self._broadcast_text(json.dumps({
+                        "type": "connection_status",
+                        "status": "reconnecting",
+                    }))
+                    # Run reconnect in executor to avoid blocking event loop
+                    loop = asyncio.get_event_loop()
+                    success = await loop.run_in_executor(None, self.acq.reconnect)
+                    status = "connected" if success else "disconnected"
+                    log.info("Reconnect result: %s", status)
+                    await self._broadcast_text(json.dumps({
+                        "type": "connection_status",
+                        "status": status,
+                    }))
+                    if not success:
+                        await asyncio.sleep(5)  # back off before next attempt
+                    continue
 
             eeg = self.acq.get_eeg_data()
             if eeg is not None and eeg.shape[1] > 0:
