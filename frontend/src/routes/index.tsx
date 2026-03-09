@@ -7,6 +7,7 @@ import { BrainMetrics } from "../components/BrainMetrics";
 import { VitalsPanel } from "../components/VitalsPanel";
 import { MotionPanel } from "../components/MotionPanel";
 import { ControlsPanel } from "../components/ControlsPanel";
+import { RecordingPanel } from "../components/RecordingPanel";
 
 export const Route = createFileRoute("/")({
   component: Dashboard,
@@ -64,6 +65,12 @@ function Dashboard() {
           />
         </div>
       </div>
+
+      {/* Recording */}
+      <RecordingPanel
+        isConnected={isConnected}
+        sendCommand={sendCommand}
+      />
 
       {/* Controls */}
       <ControlsPanel

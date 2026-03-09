@@ -1,86 +1,96 @@
 import { useEffect, useRef } from "react";
-import { WebglPlot, WebglLinePlot, ColorRGBA } from "webgl-plot";
 import type { SensorBuffers } from "../hooks/useSensorStream";
 import { CHANNEL_NAMES, EEG_CHANNELS } from "../lib/protocol";
-import type { LineConfig } from "webgl-plot";
 
-const COLORS: ColorRGBA[] = [
-  new ColorRGBA(0.35, 0.8, 0.95, 1),   // TP9  — cyan
-  new ColorRGBA(0.95, 0.6, 0.3, 1),    // AF7  — orange
-  new ColorRGBA(0.6, 0.95, 0.4, 1),    // AF8  — green
-  new ColorRGBA(0.85, 0.4, 0.95, 1),   // TP10 — purple
+const COLORS = [
+  "#59ccf2",  // TP9  — cyan
+  "#f29a4d",  // AF7  — orange
+  "#99f266",  // AF8  — green
+  "#d966f2",  // TP10 — purple
 ];
 
-const SAMPLES_PER_CHANNEL = 256 * 5; // 5 seconds at 256Hz
+const SAMPLES_VISIBLE = 256 * 4; // 4 seconds at 256Hz
+const Y_SCALE = 0.003; // µV to normalized (-1..1) per channel lane
 
 interface Props {
   buffersRef: React.RefObject<SensorBuffers>;
 }
 
-/** Build initial interleaved (x, y) points for a flat line */
-function makeInitialPoints(numSamples: number): Float32Array {
-  const points = new Float32Array(numSamples * 2);
-  for (let i = 0; i < numSamples; i++) {
-    points[i * 2] = (i / (numSamples - 1)) * 2 - 1; // x: [-1, 1]
-    points[i * 2 + 1] = 0;                            // y: 0
-  }
-  return points;
-}
-
 export function EEGWaveformPanel({ buffersRef }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wglRef = useRef<WebglPlot | null>(null);
-  const plotterRef = useRef<WebglLinePlot | null>(null);
   const rafRef = useRef<number>(0);
-  const yBufRef = useRef<Float32Array>(new Float32Array(SAMPLES_PER_CHANNEL));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Initialize WebGL plot
-    const wgl = new WebglPlot(canvas);
-    wglRef.current = wgl;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-    // Create a thin-line plotter with one line per EEG channel
-    const plotter = wgl.newThinLinePlotter(EEG_CHANNELS);
-    plotterRef.current = plotter;
-
-    const linesConfig: LineConfig[] = [];
-    for (let ch = 0; ch < EEG_CHANNELS; ch++) {
-      const yOffset = 0.75 - ch * 0.5; // spread across [-1, 1]
-      linesConfig.push({
-        points: makeInitialPoints(SAMPLES_PER_CHANNEL),
-        color: COLORS[ch].toArray() as [number, number, number, number],
-        scale: [1, 0.002],       // scale microvolts to WebGL coordinates
-        offset: [0, yOffset],    // stack channels vertically
-      });
-    }
-    plotter.initLines(linesConfig);
-
-    // Reusable buffer for Y updates
-    const yBuf = yBufRef.current;
-
-    // Animation loop — reads from ring buffers, updates WebGL
     const animate = () => {
-      const buffers = buffersRef.current;
-      if (buffers) {
-        for (let ch = 0; ch < EEG_CHANNELS; ch++) {
-          const data = buffers.eeg[ch].getOrdered();
-          const len = Math.min(data.length, SAMPLES_PER_CHANNEL);
-          // Fill the Y buffer; zero-pad if ring buffer has fewer samples
-          for (let i = 0; i < len; i++) {
-            yBuf[i] = data[i];
-          }
-          for (let i = len; i < SAMPLES_PER_CHANNEL; i++) {
-            yBuf[i] = 0;
-          }
-          plotter.updateLineY(ch, yBuf);
-        }
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = rect.width * dpr;
+      const h = rect.height * dpr;
+
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
       }
-      wgl.update();
+
+      ctx.clearRect(0, 0, w, h);
+
+      const buffers = buffersRef.current;
+      if (!buffers) {
+        rafRef.current = requestAnimationFrame(animate);
+        return;
+      }
+
+      const laneH = h / EEG_CHANNELS;
+
+      for (let ch = 0; ch < EEG_CHANNELS; ch++) {
+        const data = buffers.eeg[ch].getOrdered();
+        const len = data.length;
+        if (len < 2) continue;
+
+        const yCenter = laneH * (ch + 0.5);
+        const samplesShow = Math.min(len, SAMPLES_VISIBLE);
+        const startIdx = len - samplesShow;
+
+        ctx.beginPath();
+        ctx.strokeStyle = COLORS[ch];
+        ctx.lineWidth = dpr;
+
+        for (let i = 0; i < samplesShow; i++) {
+          const x = (i / samplesShow) * w;
+          const y = yCenter - data[startIdx + i] * Y_SCALE * laneH;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Channel label
+        ctx.fillStyle = COLORS[ch];
+        ctx.font = `${11 * dpr}px monospace`;
+        ctx.globalAlpha = 0.7;
+        ctx.fillText(CHANNEL_NAMES[ch], 4 * dpr, laneH * ch + 14 * dpr);
+        ctx.globalAlpha = 1;
+      }
+
+      // Grid lines between channels
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.lineWidth = dpr;
+      for (let ch = 1; ch < EEG_CHANNELS; ch++) {
+        const y = laneH * ch;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
       rafRef.current = requestAnimationFrame(animate);
     };
+
     rafRef.current = requestAnimationFrame(animate);
 
     return () => {
@@ -89,23 +99,10 @@ export function EEGWaveformPanel({ buffersRef }: Props) {
   }, [buffersRef]);
 
   return (
-    <div className="relative w-full">
-      {/* Channel labels */}
-      <div className="absolute left-2 top-0 bottom-0 flex flex-col justify-around pointer-events-none z-10">
-        {CHANNEL_NAMES.map((name, i) => (
-          <span
-            key={name}
-            className="text-xs font-mono opacity-70"
-            style={{ color: `rgba(${COLORS[i].r * 255}, ${COLORS[i].g * 255}, ${COLORS[i].b * 255}, 0.9)` }}
-          >
-            {name}
-          </span>
-        ))}
-      </div>
-      <canvas
-        ref={canvasRef}
-        className="w-full h-64 bg-black/50 rounded-md border border-white/10"
-      />
-    </div>
+    <canvas
+      ref={canvasRef}
+      className="w-full h-64 bg-black/50 rounded-md border border-white/10"
+      style={{ display: "block" }}
+    />
   );
 }

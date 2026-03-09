@@ -43,15 +43,24 @@ def test_compute_fit_status():
 
 
 def test_compute_head_movement():
-    still = np.array([[0.0], [0.0], [9.81]], dtype=np.float32)
-    assert compute_head_movement(still) < 0.1
+    # Muse 2 reports accel in g's — movement is measured by variance over time
+    # Still: constant gravity vector, zero variance
+    still = np.array(
+        [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]],
+        dtype=np.float32,
+    )
+    assert compute_head_movement(still) < 0.01
 
-    moving = np.array([[8.0], [6.0], [9.81]], dtype=np.float32)
-    assert compute_head_movement(moving) > 0.3
+    # Moving: varying acceleration across samples
+    moving = np.array(
+        [[0.0, 0.5, -0.3, 0.2], [0.0, 0.3, -0.1, 0.4], [1.0, 0.8, 1.2, 0.9]],
+        dtype=np.float32,
+    )
+    assert compute_head_movement(moving) > 0.1
 
 
 def test_compute_head_pose():
-    accel = np.array([[0.0], [0.0], [9.81]], dtype=np.float32)
+    accel = np.array([[0.0], [0.0], [1.0]], dtype=np.float32)
     pitch, roll = compute_head_pose(accel)
     assert abs(pitch) < 2.0
     assert abs(roll) < 2.0

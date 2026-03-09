@@ -1,5 +1,4 @@
 import time
-import numpy as np
 from backend.acquisition import Acquisition
 from backend.config import BoardConfig
 

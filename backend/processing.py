@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from brainflow.data_filter import DataFilter
+from brainflow.data_filter import DataFilter, DetrendOperations, WindowOperations
 
 CH_NAMES = ["TP9", "AF7", "AF8", "TP10"]
 BAND_NAMES = ["delta", "theta", "alpha", "beta", "gamma"]
@@ -13,34 +13,41 @@ BANDS = {
     "gamma": (30.0, 45.0),
 }
 
-GRAVITY = 9.81
-RAIL_THRESHOLD = 995.0
+GRAVITY = 1.0  # Muse 2 accelerometer reports in g's
+RAIL_THRESHOLD = 995.0  # µV
 
 
 def compute_band_powers(
     eeg: np.ndarray, sampling_rate: int = 256
 ) -> dict[str, list[float]]:
-    """Compute average band powers per channel.
+    """Compute band powers per channel using BrainFlow's get_band_power.
+
     Args:
-        eeg: (n_channels, n_samples) array
+        eeg: (n_channels, n_samples) array in µV
         sampling_rate: Hz
     Returns:
         Dict with band names as keys, lists of per-channel power as values.
     """
+    nfft = DataFilter.get_nearest_power_of_two(sampling_rate)
     result = {band: [] for band in BAND_NAMES}
+
     for ch_idx in range(eeg.shape[0]):
-        channel_data = eeg[ch_idx].copy()
+        channel_data = eeg[ch_idx].astype(np.float64)
+        n = len(channel_data)
+        if n < nfft:
+            for band_name in BAND_NAMES:
+                result[band_name].append(0.0)
+            continue
         try:
+            DataFilter.detrend(channel_data, DetrendOperations.LINEAR.value)
             psd = DataFilter.get_psd_welch(
-                channel_data,
-                256,  # nfft
-                256 // 2,  # overlap
-                sampling_rate,
-                2,  # hamming window
+                channel_data, nfft, nfft // 2,
+                sampling_rate, WindowOperations.HANNING.value,
             )
-            bands = DataFilter.get_avg_band_powers(psd)
-            for i, band_name in enumerate(BAND_NAMES):
-                result[band_name].append(float(bands[0][i]))
+            for band_name in BAND_NAMES:
+                low, high = BANDS[band_name]
+                power = DataFilter.get_band_power(psd, low, high)
+                result[band_name].append(round(float(power), 2))
         except Exception:
             for band_name in BAND_NAMES:
                 result[band_name].append(0.0)
@@ -103,13 +110,17 @@ def compute_frontal_alpha_asymmetry(band_powers: dict[str, list[float]]) -> floa
 
 
 def compute_head_movement(accel: np.ndarray) -> float:
-    """Compute head movement magnitude from accelerometer.
-    Returns deviation of accel vector from gravity (0 = still).
+    """Compute head movement from accelerometer variance.
+    Uses per-sample acceleration magnitude variance over the window.
+    Returns RMS of per-axis std-dev (0 = perfectly still).
     """
-    mean_accel = np.mean(accel, axis=1)
-    magnitude = float(np.linalg.norm(mean_accel))
-    deviation = abs(magnitude - GRAVITY) / GRAVITY
-    return round(deviation, 3)
+    if accel.shape[1] < 2:
+        return 0.0
+    # Standard deviation of each axis over the time window
+    std_per_axis = np.std(accel, axis=1)  # shape (3,)
+    # RMS of the three axis stdevs — captures jitter in any direction
+    rms_std = float(np.sqrt(np.mean(std_per_axis**2)))
+    return round(rms_std, 4)
 
 
 def compute_head_pose(accel: np.ndarray) -> tuple[float, float]:
@@ -130,7 +141,9 @@ def build_metrics(
     """Build the full metrics JSON payload from sensor data."""
     metrics: dict = {}
 
-    if eeg is not None and eeg.shape[1] >= 256:
+    # Need at least nfft samples for PSD (256 for 256Hz → nfft=256)
+    nfft = DataFilter.get_nearest_power_of_two(sampling_rate)
+    if eeg is not None and eeg.shape[1] >= nfft:
         band_powers = compute_band_powers(eeg, sampling_rate)
         quality = compute_signal_quality(eeg)
         metrics["eeg"] = {
@@ -141,19 +154,55 @@ def build_metrics(
             "fit_status": compute_fit_status(quality),
         }
 
-    if ppg is not None and ppg.shape[1] >= 64:
+    # PPG: channels are [Red=0, IR=1, Ambient=2] per BrainFlow Muse 2 docs
+    if ppg is not None and ppg.shape[1] >= 1024:
+        ppg_ir = ppg[1].astype(np.float64)    # channel index 1 = IR
+        ppg_red = ppg[0].astype(np.float64)   # channel index 0 = Red
         try:
-            hr = float(DataFilter.get_heart_rate(ppg[0], 64, 64, 3))
-        except Exception:
+            hr = float(DataFilter.get_heart_rate(ppg_ir, ppg_red, 64, 1024))
+        except Exception as e:
+            import logging
+            logging.getLogger("eeg-server").warning("get_heart_rate failed: %s", e)
             hr = 0.0
         try:
-            spo2 = float(DataFilter.get_oxygen_level(ppg[:2], 64, 10))
-        except Exception:
+            spo2 = float(DataFilter.get_oxygen_level(ppg_ir, ppg_red, 64))
+        except Exception as e:
+            import logging
+            logging.getLogger("eeg-server").warning("get_oxygen_level failed: %s", e)
             spo2 = 0.0
+
+        # HRV: compute RMSSD from R-R intervals detected in IR PPG signal
+        hrv_rmssd = 0.0
+        try:
+            # Detect peaks in IR PPG for R-R intervals
+            ppg_ir_filtered = ppg_ir.copy()
+            DataFilter.detrend(ppg_ir_filtered, DetrendOperations.LINEAR.value)
+            DataFilter.perform_bandpass(ppg_ir_filtered, 64, 0.5, 4.0, 4,
+                                        0, 0.0)  # 0.5-4Hz bandpass for pulse
+            # Simple peak detection via zero-crossings of derivative
+            diff = np.diff(ppg_ir_filtered)
+            peaks = []
+            for i in range(1, len(diff)):
+                if diff[i - 1] > 0 and diff[i] <= 0:
+                    peaks.append(i)
+            if len(peaks) >= 3:
+                rr_intervals = np.diff(peaks) / 64.0 * 1000.0  # ms
+                # Filter physiological range (300-2000ms = 30-200 bpm)
+                rr_intervals = rr_intervals[
+                    (rr_intervals > 300) & (rr_intervals < 2000)
+                ]
+                if len(rr_intervals) >= 2:
+                    successive_diffs = np.diff(rr_intervals)
+                    hrv_rmssd = float(
+                        np.sqrt(np.mean(successive_diffs ** 2))
+                    )
+        except Exception:
+            hrv_rmssd = 0.0
+
         metrics["ppg"] = {
             "heart_rate_bpm": round(hr, 1),
             "spo2_percent": round(spo2, 1),
-            "hrv_rmssd_ms": 0.0,
+            "hrv_rmssd_ms": round(hrv_rmssd, 1),
         }
 
     if imu is not None and imu.shape[1] > 0:
@@ -163,7 +212,7 @@ def build_metrics(
         metrics["imu"] = {
             "head_movement": movement,
             "head_pose": {"pitch": pitch, "roll": roll},
-            "motion_artifact": movement > 0.3,
+            "motion_artifact": movement > 0.05,
             "jaw_clench": False,
         }
 

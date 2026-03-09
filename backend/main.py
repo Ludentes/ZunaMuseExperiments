@@ -2,14 +2,16 @@ import asyncio
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import websockets
+from brainflow.board_shim import BoardShim
+from brainflow.data_filter import DataFilter
 
 from backend.acquisition import Acquisition
 from backend.config import Config
-from backend.processing import build_metrics
+from backend.processing import build_metrics, CH_NAMES
 from backend.protocol import (
     MSG_EEG, MSG_PPG, MSG_IMU,
     encode_binary_frame,
@@ -18,6 +20,8 @@ from backend.protocol import (
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("eeg-server")
+BoardShim.set_log_level(3)  # WARN only — suppress noisy BrainFlow C library logs
+DataFilter.set_log_level(3)
 
 
 class EEGServer:
@@ -29,18 +33,30 @@ class EEGServer:
         self._ppg_enabled = self.config.board.enable_ppg
         self._imu_enabled = True
         self._recording = False
+        self._recording_label: str = "unlabeled"
+        self._recording_start: float = 0.0
+        self._recording_trial_num: int = 0
+        self._recording_cue_time_ms: int = 0
+        self._recording_trial_duration_ms: int = 0
+        self._recording_session_id: str = ""
+        self._recording_eeg: list = []
+        self._recording_ppg: list = []
+        self._recording_imu: list = []
         self._eeg_buffer = []
         self._ppg_buffer = []
         self._imu_buffer = []
+        # PPG accumulates across metrics cycles (needs ~512 samples = 8s at 64Hz)
+        self._ppg_accumulator: np.ndarray | None = None
 
     async def start(self):
-        self.acq = Acquisition(self.config.board)
-        self.acq.start()
+        acq = Acquisition(self.config.board)
+        acq.start()
+        self.acq = acq
         self._running = True
         log.info(
             "BrainFlow started — board %d, EEG %dHz",
             self.config.board.board_id,
-            self.acq.eeg_sampling_rate,
+            acq.eeg_sampling_rate,
         )
 
         async with websockets.serve(
@@ -67,7 +83,7 @@ class EEGServer:
             self.clients.discard(ws)
             log.info("Client disconnected (%d total)", len(self.clients))
 
-    async def _handle_command(self, ws, message: str):
+    async def _handle_command(self, ws, message: str):  # type: ignore[reportUnusedParameter]
         try:
             cmd = json.loads(message)
         except json.JSONDecodeError:
@@ -83,11 +99,121 @@ class EEGServer:
             self.config.filter.lowpass = cmd.get("lowpass", self.config.filter.lowpass)
             self.config.filter.notch = cmd.get("notch", self.config.filter.notch)
         elif action == "start_recording":
+            label = cmd.get("label", "unlabeled")
+            trial_num = cmd.get("trial_num", 0)
+            cue_time_ms = cmd.get("cue_time_ms", 0)
+            trial_duration_ms = cmd.get("trial_duration_ms", 0)
+            session_id = cmd.get("session_id", "")
             self._recording = True
-            log.info("Recording started")
+            self._recording_label = label
+            self._recording_start = time.time()
+            self._recording_trial_num = trial_num
+            self._recording_cue_time_ms = cue_time_ms
+            self._recording_trial_duration_ms = trial_duration_ms
+            self._recording_session_id = session_id
+            self._recording_eeg.clear()
+            self._recording_ppg.clear()
+            self._recording_imu.clear()
+            log.info("Recording started — label=%s session=%s trial=%d cue=%dms",
+                     label, session_id, trial_num, cue_time_ms)
         elif action == "stop_recording":
-            self._recording = False
-            log.info("Recording stopped")
+            if self._recording:
+                filepath = self._save_recording()
+                self._recording = False
+                log.info("Recording stopped — saved to %s", filepath)
+                await self._broadcast_text(json.dumps({
+                    "type": "recording_saved",
+                    "filepath": str(filepath),
+                    "label": self._recording_label,
+                }))
+
+    def _save_recording(self) -> Path:
+        """Save recorded data to .npz and .fif files."""
+        session_id = getattr(self, '_recording_session_id', '')
+        # Organize by label/session_id if provided
+        if session_id:
+            rec_dir = Path(self.config.server.recording_dir) / self._recording_label / session_id
+        else:
+            rec_dir = Path(self.config.server.recording_dir) / self._recording_label
+        rec_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        duration = time.time() - self._recording_start
+        trial_num = self._recording_trial_num
+        fname = f"{self._recording_label}_t{trial_num:02d}_{ts}"
+
+        eeg = np.concatenate(self._recording_eeg, axis=1) if self._recording_eeg else np.array([])
+        ppg = np.concatenate(self._recording_ppg, axis=1) if self._recording_ppg else np.array([])
+        imu = np.concatenate(self._recording_imu, axis=1) if self._recording_imu else np.array([])
+
+        npz_path = rec_dir / f"{fname}.npz"
+        np.savez(npz_path, eeg=eeg, ppg=ppg, imu=imu,
+                 label=self._recording_label,
+                 session_id=session_id,
+                 trial_num=trial_num,
+                 cue_time_ms=self._recording_cue_time_ms,
+                 trial_duration_ms=self._recording_trial_duration_ms,
+                 duration=duration,
+                 ch_names=CH_NAMES, sfreq=256,
+                 ppg_sfreq=64, imu_sfreq=52)
+        log.info("Saved %s — EEG %s (%.1fs) trial=%d cue=%dms",
+                 npz_path, eeg.shape if eeg.size else "empty",
+                 duration, trial_num, self._recording_cue_time_ms)
+
+        # Also save MNE .fif for ZUNA
+        if eeg.size:
+            try:
+                import mne
+                info = mne.create_info(ch_names=list(CH_NAMES), sfreq=256.0, ch_types="eeg")
+                eeg_volts = eeg.astype(np.float64) * 1e-6  # µV → V
+                raw = mne.io.RawArray(eeg_volts, info, verbose=False)
+                montage = mne.channels.make_standard_montage("standard_1020")
+                raw.set_montage(montage)
+                # Add cue event as MNE annotation
+                if self._recording_cue_time_ms > 0:
+                    onset = self._recording_cue_time_ms / 1000.0
+                    raw.set_annotations(mne.Annotations(
+                        onset=[onset],
+                        duration=[0.1],
+                        description=[self._recording_label],
+                    ))
+                fif_path = rec_dir / f"{fname}_raw.fif"
+                raw.save(fif_path, overwrite=True, verbose=False)
+                # Save PPG/IMU companion .fif
+                aux_channels = []
+                aux_data = []
+                aux_types = []
+                if ppg.size and ppg.ndim == 2:
+                    aux_channels += ["PPG_RED", "PPG_IR", "PPG_AMB"]
+                    aux_types += ["misc", "misc", "misc"]
+                    ppg_volts = ppg.astype(np.float64)
+                    aux_data.append((ppg_volts, 64.0))
+                if imu.size and imu.ndim == 2:
+                    aux_channels += ["ACCEL_X", "ACCEL_Y", "ACCEL_Z",
+                                     "GYRO_X", "GYRO_Y", "GYRO_Z"]
+                    aux_types += ["misc"] * 6
+                    imu_float = imu.astype(np.float64)
+                    aux_data.append((imu_float, 52.0))
+                if aux_data:
+                    for adata, sfreq_aux in aux_data:
+                        ch_names_aux = aux_channels[:adata.shape[0]]
+                        ch_types_aux = aux_types[:adata.shape[0]]
+                        aux_info = mne.create_info(
+                            ch_names=ch_names_aux,
+                            sfreq=sfreq_aux,
+                            ch_types=ch_types_aux,
+                        )
+                        aux_raw = mne.io.RawArray(adata, aux_info, verbose=False)
+                        suffix = "ppg" if sfreq_aux == 64.0 else "imu"
+                        aux_path = rec_dir / f"{fname}_{suffix}.fif"
+                        aux_raw.save(aux_path, overwrite=True, verbose=False)
+                        aux_channels = aux_channels[adata.shape[0]:]
+                        aux_types = aux_types[adata.shape[0]:]
+                log.info("Saved %s (MNE .fif)", fif_path)
+            except ImportError:
+                log.warning("MNE not installed — skipping .fif export")
+
+        return npz_path
 
     async def _broadcast_binary(self, data: bytes):
         if not self.clients:
@@ -110,18 +236,24 @@ class EEGServer:
             eeg = self.acq.get_eeg_data()
             if eeg is not None and eeg.shape[1] > 0:
                 self._eeg_buffer.append(eeg)
+                if self._recording:
+                    self._recording_eeg.append(eeg)
                 await self._broadcast_binary(encode_binary_frame(MSG_EEG, eeg))
 
             if self._ppg_enabled:
                 ppg = self.acq.get_ppg_data()
                 if ppg is not None and ppg.shape[1] > 0:
                     self._ppg_buffer.append(ppg)
+                    if self._recording:
+                        self._recording_ppg.append(ppg)
                     await self._broadcast_binary(encode_binary_frame(MSG_PPG, ppg))
 
             if self._imu_enabled:
                 imu = self.acq.get_imu_data()
                 if imu is not None and imu.shape[1] > 0:
                     self._imu_buffer.append(imu)
+                    if self._recording:
+                        self._recording_imu.append(imu)
                     await self._broadcast_binary(encode_binary_frame(MSG_IMU, imu))
 
             await asyncio.sleep(interval)
@@ -138,7 +270,7 @@ class EEGServer:
                 if self._eeg_buffer
                 else None
             )
-            ppg = (
+            ppg_new = (
                 np.concatenate(self._ppg_buffer, axis=1)
                 if self._ppg_buffer
                 else None
@@ -149,14 +281,44 @@ class EEGServer:
                 else None
             )
 
-            # Clear buffers
+            # Clear EEG/IMU buffers (consumed each cycle)
             self._eeg_buffer.clear()
             self._ppg_buffer.clear()
             self._imu_buffer.clear()
 
+            # PPG: accumulate across cycles (64Hz × 2s = ~128/cycle, need 512)
+            if ppg_new is not None:
+                if self._ppg_accumulator is not None:
+                    self._ppg_accumulator = np.concatenate(
+                        [self._ppg_accumulator, ppg_new], axis=1
+                    )
+                else:
+                    self._ppg_accumulator = ppg_new
+                # Keep max 20s of PPG data (1280 samples at 64Hz)
+                # get_heart_rate needs fft_size=1024, so need ≥1024 samples
+                max_ppg = 1280
+                if self._ppg_accumulator.shape[1] > max_ppg:
+                    self._ppg_accumulator = self._ppg_accumulator[:, -max_ppg:]
+            ppg = self._ppg_accumulator
+
             sr = self.acq.eeg_sampling_rate if self.acq else 256
+            log.info(
+                "Metrics buffers — EEG: %s, PPG: %s, IMU: %s",
+                eeg.shape if eeg is not None else None,
+                ppg.shape if ppg is not None else None,
+                imu.shape if imu is not None else None,
+            )
             metrics = build_metrics(eeg, ppg, imu, sr)
+
+            # Always include recording status
+            metrics["session"] = {
+                "recording": self._recording,
+                "label": self._recording_label if self._recording else None,
+                "duration_sec": round(time.time() - self._recording_start, 1) if self._recording else 0,
+            }
+
             if metrics:
+                log.debug("Broadcasting metrics keys: %s", list(metrics.keys()))
                 await self._broadcast_text(encode_metrics(metrics))
 
     def shutdown(self):
@@ -173,10 +335,12 @@ def main():
         help="Use synthetic board (no hardware needed)",
     )
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--mac", type=str, default="", help="Muse MAC address (e.g. 00:55:DA:B8:2B:1B)")
     args = parser.parse_args()
 
     config = Config()
     config.server.port = args.port
+    config.board.mac_address = args.mac
     if args.synthetic:
         config.board.board_id = -1  # SYNTHETIC_BOARD
         config.board.enable_ppg = False

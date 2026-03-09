@@ -20,7 +20,8 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame {
   const type = view.getUint8(0);
   const channels = view.getUint16(1, true); // little-endian
   const samples = view.getUint16(3, true);
-  const data = new Float32Array(buffer, 5); // offset past 5-byte header
+  // Copy data past 5-byte header (offset 5 is not 4-byte aligned, so can't create a view)
+  const data = new Float32Array(buffer.slice(5));
   return { type, channels, samples, data };
 }
 
@@ -53,7 +54,7 @@ export interface Metrics {
   };
   session?: {
     recording: boolean;
+    label: string | null;
     duration_sec: number;
-    filename: string | null;
   };
 }
