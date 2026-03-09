@@ -20,7 +20,7 @@ from backend.pipeline.stages.preprocessing import BandPassFilter
 def create_default_pipeline() -> Pipeline:
     stages = [
         # SLOW — spectral features, vitals
-        BandPassFilter(lowcut=1.0, highcut=45.0, notch=50.0),
+        BandPassFilter(lowcut=1.0, highcut=45.0),
         BandPowerExtractor(),
         SignalQualityChecker(),
         HeartRateExtractor(),

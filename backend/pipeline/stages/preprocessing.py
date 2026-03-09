@@ -42,7 +42,7 @@ class BandPassFilter(Stage):
         for ch in range(filtered.shape[0]):
             if self.notch is not None:
                 DataFilter.remove_environmental_noise(
-                    filtered[ch], sr, self.notch,
+                    filtered[ch], sr, self.notch.value,
                 )
             DataFilter.perform_bandpass(
                 filtered[ch], sr, self.lowcut, self.highcut,
