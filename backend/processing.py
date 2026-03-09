@@ -1,3 +1,9 @@
+"""DEPRECATED: This module is superseded by backend.pipeline.
+
+All functions here are preserved for test compatibility.
+New code should use the pipeline stages in backend/pipeline/stages/.
+Will be removed after migration is validated in production.
+"""
 import math
 import numpy as np
 from brainflow.data_filter import DataFilter, DetrendOperations, WindowOperations

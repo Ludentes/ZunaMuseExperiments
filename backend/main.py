@@ -11,7 +11,9 @@ from brainflow.data_filter import DataFilter
 
 from backend.acquisition import Acquisition
 from backend.config import Config
-from backend.processing import build_metrics, CH_NAMES
+from backend.pipeline.factory import create_default_pipeline
+from backend.pipeline.serialize import frame_to_metrics
+from backend.pipeline.types import CH_NAMES, Cadence, PipelineFrame
 from backend.protocol import (
     MSG_EEG, MSG_PPG, MSG_IMU,
     encode_binary_frame,
@@ -45,8 +47,7 @@ class EEGServer:
         self._eeg_buffer = []
         self._ppg_buffer = []
         self._imu_buffer = []
-        # PPG accumulates across metrics cycles (needs ~512 samples = 8s at 64Hz)
-        self._ppg_accumulator: np.ndarray | None = None
+        self._pipeline = create_default_pipeline()
 
     async def start(self):
         acq = Acquisition(self.config.board)
@@ -240,6 +241,22 @@ class EEGServer:
                     self._recording_eeg.append(eeg)
                 await self._broadcast_binary(encode_binary_frame(MSG_EEG, eeg))
 
+                # Run FAST stages for event detection
+                fast_frame = PipelineFrame(
+                    eeg=eeg, ppg=None, imu=None,
+                    timestamp=time.time(),
+                )
+                self._pipeline.run(Cadence.FAST, fast_frame)
+                if fast_frame.events:
+                    for event in fast_frame.events:
+                        await self._broadcast_text(json.dumps({
+                            "type": "bci_event",
+                            "kind": event.kind,
+                            "confidence": event.confidence,
+                            "channel": event.channel,
+                            "timestamp": event.timestamp,
+                        }))
+
             if self._ppg_enabled:
                 ppg = self.acq.get_ppg_data()
                 if ppg is not None and ppg.shape[1] > 0:
@@ -264,13 +281,12 @@ class EEGServer:
         while self._running:
             await asyncio.sleep(interval)
 
-            # Concatenate buffered data for metrics computation
             eeg = (
                 np.concatenate(self._eeg_buffer, axis=1)
                 if self._eeg_buffer
                 else None
             )
-            ppg_new = (
+            ppg = (
                 np.concatenate(self._ppg_buffer, axis=1)
                 if self._ppg_buffer
                 else None
@@ -281,36 +297,17 @@ class EEGServer:
                 else None
             )
 
-            # Clear EEG/IMU buffers (consumed each cycle)
             self._eeg_buffer.clear()
             self._ppg_buffer.clear()
             self._imu_buffer.clear()
 
-            # PPG: accumulate across cycles (64Hz × 2s = ~128/cycle, need 512)
-            if ppg_new is not None:
-                if self._ppg_accumulator is not None:
-                    self._ppg_accumulator = np.concatenate(
-                        [self._ppg_accumulator, ppg_new], axis=1
-                    )
-                else:
-                    self._ppg_accumulator = ppg_new
-                # Keep max 20s of PPG data (1280 samples at 64Hz)
-                # get_heart_rate needs fft_size=1024, so need ≥1024 samples
-                max_ppg = 1280
-                if self._ppg_accumulator.shape[1] > max_ppg:
-                    self._ppg_accumulator = self._ppg_accumulator[:, -max_ppg:]
-            ppg = self._ppg_accumulator
-
-            sr = self.acq.eeg_sampling_rate if self.acq else 256
-            log.info(
-                "Metrics buffers — EEG: %s, PPG: %s, IMU: %s",
-                eeg.shape if eeg is not None else None,
-                ppg.shape if ppg is not None else None,
-                imu.shape if imu is not None else None,
+            frame = PipelineFrame(
+                eeg=eeg, ppg=ppg, imu=imu,
+                timestamp=time.time(),
             )
-            metrics = build_metrics(eeg, ppg, imu, sr)
+            self._pipeline.run(Cadence.SLOW, frame)
+            metrics = frame_to_metrics(frame)
 
-            # Always include recording status
             metrics["session"] = {
                 "recording": self._recording,
                 "label": self._recording_label if self._recording else None,
