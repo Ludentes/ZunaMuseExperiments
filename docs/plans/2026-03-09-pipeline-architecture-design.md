@@ -1,7 +1,7 @@
 # Pipeline Architecture Design
 
 **Date:** 2026-03-09
-**Status:** Approved
+**Status:** Approved (v2 — typed result registry)
 
 ---
 
@@ -15,8 +15,19 @@ Pluggable signal processing pipeline replacing the monolithic `build_metrics()` 
 |----------|--------|-----------|
 | Pipeline topology | Linear chain of stages | Data flows one direction; pub-sub is overkill for 4-channel Muse |
 | Multi-stream handling | Single combined `PipelineFrame` carrying EEG/PPG/IMU | Simplest; cross-stream logic is trivial. Separate per-stream pipelines designed for but not implemented |
-| Inter-stage data | Typed fields on `PipelineFrame` | Type-safe, IDE autocomplete, catches bugs at dev time |
+| Inter-stage data | **Typed result registry** — fixed input fields + open typed result slots | Adding a stage never requires modifying `PipelineFrame`. Each stage owns its result dataclass. Type-safe via generics. |
 | Timing | Two cadences: FAST (~16ms) and SLOW (~2s) | Blink detection needs <50ms latency; band powers are expensive and don't need 60fps |
+
+### Why typed result registry over flat fields
+
+v1 had every stage output as a field on `PipelineFrame`. This meant adding any new stage required modifying `PipelineFrame`, updating its docstring contract, updating the serializer, and possibly the frontend — 3-4 files touched per new capability. The "keep this current" warning was papering over a structural coupling problem.
+
+v2 splits the frame into:
+- **Fixed inputs** (hardware-determined, rarely change): `eeg`, `ppg`, `imu`, `timestamp`
+- **Open results** (stage-determined, change often): typed dataclasses stored by class key
+- **Events** (always present, append-only): `list[Event]`
+
+Adding a new stage = write the stage class + its result dataclass. Nothing else changes.
 
 ## Core Types
 
@@ -27,6 +38,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, TypeVar, overload
 import numpy as np
 
 
@@ -54,83 +66,125 @@ BANDS = {
     "gamma": (30.0, 44.0),
 }
 
+T = TypeVar("T")
+
 
 @dataclass
 class PipelineFrame:
     """
-    ⚠️  MAINTAINER CONTRACT ⚠️
-    ──────────────────────────────────────────────────────────────
-    Every field here MUST be documented with:
-      - Which stage WRITES it
-      - Which stages READ it
-    When you add a stage that produces new data, ADD A FIELD HERE.
-    When you remove a stage, REMOVE ITS FIELD.
-    This dataclass IS the pipeline's data schema.
-    Keep it current or debugging becomes hell.
-    ──────────────────────────────────────────────────────────────
+    Carries raw sensor data through the pipeline. Stages read inputs
+    and store typed results via set()/get().
 
-    Raw inputs — set by pipeline runner, never by stages:
-        eeg, ppg, imu, timestamp
+    INPUTS (fixed, hardware-determined — only change if hardware changes):
+        eeg:       (4, N) µV at 256Hz — TP9, AF7, AF8, TP10
+        ppg:       (3, M) raw at 64Hz — Red, IR, Ambient
+        imu:       (6, K) g's/dps at 52Hz — accel[3] + gyro[3]
+        timestamp: time.time() when frame was created
 
-    Preprocessing outputs:
-        eeg_filtered        — written by: BandPassFilter or WaveletDenoiser
-                              read by: BandPowerExtractor, BlinkDetector (fallback)
+    RESULTS (open, stage-determined — stages store via frame.set()):
+        Access with frame.get(ResultClass). Each stage defines its own
+        result dataclass. No need to modify PipelineFrame when adding stages.
 
-    Feature extraction outputs:
-        band_powers         — written by: BandPowerExtractor
-                              read by: serialize.frame_to_metrics
-        theta_beta_ratio    — written by: BandPowerExtractor
-                              read by: serialize.frame_to_metrics
-        frontal_alpha_asymmetry — written by: BandPowerExtractor
-                              read by: serialize.frame_to_metrics
-        signal_quality      — written by: SignalQualityChecker
-                              read by: serialize.frame_to_metrics
-        fit_status          — written by: SignalQualityChecker
-                              read by: serialize.frame_to_metrics
-        heart_rate_bpm      — written by: HeartRateExtractor
-                              read by: serialize.frame_to_metrics
-        spo2_percent        — written by: HeartRateExtractor
-                              read by: serialize.frame_to_metrics
-        hrv_rmssd_ms        — written by: HeartRateExtractor
-                              read by: serialize.frame_to_metrics
-        head_movement       — written by: HeadMotionExtractor
-                              read by: serialize.frame_to_metrics
-        head_pose           — written by: HeadMotionExtractor
-                              read by: serialize.frame_to_metrics
-
-    Detection outputs:
-        events              — appended by: BlinkDetector, ClenchDetector
-                              read by: Action handlers
-        motion_artifact     — written by: HeadMotionExtractor
-                              read by: serialize.frame_to_metrics
-        jaw_clench          — written by: ClenchDetector
-                              read by: serialize.frame_to_metrics
+    EVENTS (append-only):
+        Detector stages append Event objects. Action handlers consume them.
     """
-    # ── Raw inputs (set by pipeline runner, never by stages) ──
-    eeg: np.ndarray | None = None       # (4, N) µV at 256Hz
-    ppg: np.ndarray | None = None       # (3, M) raw at 64Hz
-    imu: np.ndarray | None = None       # (6, K) g's/dps at 52Hz
+    # ── Fixed inputs ──
+    eeg: np.ndarray | None = None
+    ppg: np.ndarray | None = None
+    imu: np.ndarray | None = None
     timestamp: float = 0.0
 
-    # ── Preprocessing outputs ──
-    eeg_filtered: np.ndarray | None = None
+    # ── Open result registry ──
+    _results: dict[str, Any] = field(default_factory=dict, repr=False)
 
-    # ── Feature extraction outputs ──
-    band_powers: dict[str, list[float]] | None = None
-    theta_beta_ratio: list[float] | None = None
-    frontal_alpha_asymmetry: float | None = None
-    signal_quality: dict[str, float] | None = None
-    fit_status: str | None = None
-    heart_rate_bpm: float | None = None
-    spo2_percent: float | None = None
-    hrv_rmssd_ms: float | None = None
-    head_movement: float | None = None
-    head_pose: tuple[float, float] | None = None  # (pitch, roll)
-
-    # ── Detection outputs ──
+    # ── Detected events ──
     events: list[Event] = field(default_factory=list)
-    motion_artifact: bool = False
-    jaw_clench: bool = False
+
+    def set(self, result: Any) -> None:
+        """Store a stage result, keyed by its class name.
+
+        Usage:
+            frame.set(BandPowerResult(band_powers=..., theta_beta_ratio=...))
+        """
+        self._results[type(result).__name__] = result
+
+    def get(self, cls: type[T]) -> T | None:
+        """Retrieve a typed stage result, or None if not yet computed.
+
+        Usage:
+            bp = frame.get(BandPowerResult)
+            if bp:
+                print(bp.band_powers)
+        """
+        return self._results.get(cls.__name__)
+
+    def has(self, cls: type) -> bool:
+        """Check if a stage result is present."""
+        return cls.__name__ in self._results
+
+    def all_results(self) -> dict[str, Any]:
+        """Return all stored results. Used by serializer."""
+        return dict(self._results)
+```
+
+### Stage Result Dataclasses
+
+Each stage defines its own result type. These live alongside the stage implementation, not in `types.py`.
+
+```python
+# In stages/preprocessing.py
+@dataclass
+class PreprocessingResult:
+    """Output of BandPassFilter or WaveletDenoiser."""
+    eeg_filtered: np.ndarray   # same shape as input eeg, filtered
+
+# In stages/features.py
+@dataclass
+class BandPowerResult:
+    """Output of BandPowerExtractor."""
+    band_powers: dict[str, list[float]]   # {band_name: [per_ch_power]}
+    theta_beta_ratio: list[float]
+    frontal_alpha_asymmetry: float
+
+@dataclass
+class SignalQualityResult:
+    """Output of SignalQualityChecker."""
+    quality: dict[str, float]    # {channel_name: 0.0-1.0}
+    fit_status: str              # "good", "adjust", "poor"
+
+@dataclass
+class HeartRateResult:
+    """Output of HeartRateExtractor."""
+    heart_rate_bpm: float
+    spo2_percent: float
+    hrv_rmssd_ms: float
+
+@dataclass
+class HeadMotionResult:
+    """Output of HeadMotionExtractor."""
+    head_movement: float
+    head_pose: tuple[float, float]   # (pitch, roll) degrees
+    motion_artifact: bool
+
+# In stages/detectors.py
+@dataclass
+class ClenchResult:
+    """Output of ClenchDetector."""
+    jaw_clench: bool
+
+# Future — no PipelineFrame changes needed:
+
+@dataclass
+class ConcentrationResult:
+    """Output of ConcentrationScorer."""
+    concentration_score: float    # 0.0 - 1.0
+    relaxation_score: float       # 0.0 - 1.0
+
+@dataclass
+class AlphaBlockingResult:
+    """Output of AlphaBlockingDetector."""
+    alpha_blocked: bool
+    alpha_ratio: float   # current / baseline
 ```
 
 ### `backend/pipeline/base.py`
@@ -145,17 +199,18 @@ class Stage(ABC):
     Base class for all pipeline stages.
 
     CONTRACT:
-    - process() reads fields from frame, writes fields to frame.
+    - process() reads from frame (inputs or other stages' results via frame.get())
+    - process() writes its result via frame.set(MyResult(...))
+    - Detector stages also append to frame.events
     - If your stage needs state across frames (e.g. rolling window),
       keep it as instance attributes.
-    - Side effects (logging) are allowed but not required.
     """
     name: str
     cadence: Cadence
 
     @abstractmethod
     def process(self, frame: PipelineFrame) -> None:
-        """Mutate frame in-place."""
+        """Read inputs/results from frame, compute, store results via frame.set()."""
         ...
 
 
@@ -211,32 +266,115 @@ class Pipeline:
         return frame
 ```
 
+## Stage Example: Reading Another Stage's Output
+
+```python
+class BandPowerExtractor(Stage):
+    name = "band_power_extractor"
+    cadence = Cadence.SLOW
+
+    def process(self, frame: PipelineFrame) -> None:
+        # Prefer filtered EEG if a preprocessor ran before us
+        prep = frame.get(PreprocessingResult)
+        eeg = prep.eeg_filtered if prep else frame.eeg
+        if eeg is None:
+            return
+
+        band_powers = ...  # compute using BrainFlow
+        theta_beta = ...
+        faa = ...
+
+        frame.set(BandPowerResult(
+            band_powers=band_powers,
+            theta_beta_ratio=theta_beta,
+            frontal_alpha_asymmetry=faa,
+        ))
+```
+
+## Serializer: `frame_to_metrics()`
+
+The serializer maps result objects to the JSON shape the frontend expects. It's the **only place** that knows about the frontend's metrics format. When a new stage is added, only the serializer needs a new `if` block — not the frame, not the pipeline, not the stages.
+
+```python
+# backend/pipeline/serialize.py
+
+def frame_to_metrics(frame: PipelineFrame) -> dict:
+    """Convert PipelineFrame to the metrics JSON the frontend expects.
+
+    This is the single translation layer between pipeline internals
+    and the WebSocket protocol. Add a block here when adding a new
+    stage whose results should appear on the dashboard.
+    """
+    metrics: dict = {}
+
+    bp = frame.get(BandPowerResult)
+    if bp:
+        metrics["eeg"] = {
+            "band_powers": bp.band_powers,
+            "theta_beta_ratio": bp.theta_beta_ratio,
+            "frontal_alpha_asymmetry": bp.frontal_alpha_asymmetry,
+        }
+
+    sq = frame.get(SignalQualityResult)
+    if sq:
+        metrics.setdefault("eeg", {}).update({
+            "signal_quality": sq.quality,
+            "fit_status": sq.fit_status,
+        })
+
+    hr = frame.get(HeartRateResult)
+    if hr:
+        metrics["ppg"] = {
+            "heart_rate_bpm": round(hr.heart_rate_bpm, 1),
+            "spo2_percent": round(hr.spo2_percent, 1),
+            "hrv_rmssd_ms": round(hr.hrv_rmssd_ms, 1),
+        }
+
+    hm = frame.get(HeadMotionResult)
+    if hm:
+        metrics["imu"] = {
+            "head_movement": hm.head_movement,
+            "head_pose": {"pitch": hm.head_pose[0], "roll": hm.head_pose[1]},
+            "motion_artifact": hm.motion_artifact,
+        }
+
+    cl = frame.get(ClenchResult)
+    if cl:
+        metrics.setdefault("imu", {})["jaw_clench"] = cl.jaw_clench
+
+    # Future results automatically ignored until serializer updated
+    return metrics
+```
+
 ## Stages Inventory
 
 ### SLOW path (2s metrics cycle)
 
-| Stage | Reads | Writes | BrainFlow API |
+| Stage | Reads | Writes (via `frame.set()`) | BrainFlow API |
 |-------|-------|--------|---------------|
-| `BandPassFilter` | `eeg` | `eeg_filtered` | `perform_bandpass`, `remove_environmental_noise` |
-| `WaveletDenoiser` (alt) | `eeg` | `eeg_filtered` | `perform_wavelet_denoising` |
-| `BandPowerExtractor` | `eeg_filtered` or `eeg` | `band_powers`, `theta_beta_ratio`, `frontal_alpha_asymmetry` | `get_psd_welch`, `get_band_power` |
-| `SignalQualityChecker` | `eeg` | `signal_quality`, `fit_status` | `get_railed_percentage`, `calc_stddev` |
-| `HeartRateExtractor` | `ppg` | `heart_rate_bpm`, `spo2_percent`, `hrv_rmssd_ms` | `get_heart_rate`, `get_oxygen_level` |
-| `HeadMotionExtractor` | `imu` | `head_movement`, `head_pose`, `motion_artifact` | — (numpy) |
+| `BandPassFilter` | `frame.eeg` | `PreprocessingResult` | `perform_bandpass`, `remove_environmental_noise` |
+| `WaveletDenoiser` (alt) | `frame.eeg` | `PreprocessingResult` | `perform_wavelet_denoising` |
+| `BandPowerExtractor` | `PreprocessingResult` or `frame.eeg` | `BandPowerResult` | `get_psd_welch`, `get_band_power` |
+| `SignalQualityChecker` | `frame.eeg` | `SignalQualityResult` | `get_railed_percentage`, `calc_stddev` |
+| `HeartRateExtractor` | `frame.ppg` | `HeartRateResult` | `get_heart_rate`, `get_oxygen_level` |
+| `HeadMotionExtractor` | `frame.imu` | `HeadMotionResult` | — (numpy) |
 
 ### FAST path (16ms poll cycle)
 
 | Stage | Reads | Writes | BrainFlow API |
 |-------|-------|--------|---------------|
-| `BlinkDetector` | `eeg` | `events` (append) | `detect_peaks_z_score` |
-| `ClenchDetector` | `eeg` | `events` (append), `jaw_clench` | `perform_bandpass` + threshold |
+| `BlinkDetector` | `frame.eeg` | `frame.events` (append) | `detect_peaks_z_score` |
+| `ClenchDetector` | `frame.eeg` | `frame.events` (append), `ClenchResult` | `perform_bandpass` + threshold |
 
-### Future stages (not implemented now)
+### Future stages (no PipelineFrame changes needed)
 
-| Stage | Cadence | Notes |
-|-------|---------|-------|
-| `ConcentrationScorer` | SLOW | BrainFlow `MLModel(MINDFULNESS)` or custom |
-| `AlphaBlockingDetector` | SLOW | Alpha vs calibrated baseline |
+| Stage | Cadence | Result type | Notes |
+|-------|---------|-------------|-------|
+| `ConcentrationScorer` | SLOW | `ConcentrationResult` | BrainFlow `MLModel(MINDFULNESS/RESTFULNESS)` |
+| `AlphaBlockingDetector` | SLOW | `AlphaBlockingResult` | Alpha vs calibrated baseline |
+| `ICAFilter` | SLOW | `PreprocessingResult` | BrainFlow `perform_ica` — alternative preprocessor |
+| `WaveletFeatureExtractor` | SLOW | `BandPowerResult` | Wavelet decomposition as alternative to FFT bands |
+| `CSPClassifier` | SLOW | custom result | BrainFlow `get_csp` — needs labeled calibration data |
 
 ## Actions
 
@@ -257,10 +395,10 @@ backend/pipeline/
 ├── serialize.py         # frame_to_metrics() — PipelineFrame → JSON dict
 ├── stages/
 │   ├── __init__.py
-│   ├── preprocessing.py # BandPassFilter, WaveletDenoiser
+│   ├── preprocessing.py # BandPassFilter, WaveletDenoiser, PreprocessingResult
 │   ├── features.py      # BandPowerExtractor, SignalQualityChecker,
-│   │                    # HeartRateExtractor, HeadMotionExtractor
-│   └── detectors.py     # BlinkDetector, ClenchDetector
+│   │                    # HeartRateExtractor, HeadMotionExtractor + their results
+│   └── detectors.py     # BlinkDetector, ClenchDetector + ClenchResult
 └── actions/
     ├── __init__.py
     ├── log.py           # LogAction
@@ -297,6 +435,14 @@ class EEGServer:
 `build_metrics()` is deleted. `processing.py` stays as a utility module
 for standalone functions that stage implementations import.
 
+## Adding a New Stage: Checklist
+
+1. **Write the result dataclass** — in your stage file, define `@dataclass class MyResult`
+2. **Write the stage class** — extend `Stage`, implement `process()`, call `frame.set(MyResult(...))`
+3. **Add to factory** — one line in `create_default_pipeline()` stage list
+4. **If dashboard needs it** — add an `if` block in `serialize.py`'s `frame_to_metrics()`
+5. **That's it.** No `PipelineFrame` changes. No base class changes. No other stages affected.
+
 ## Migration Plan
 
 1. Create `pipeline/` package with types, base, Pipeline class
@@ -309,12 +455,32 @@ for standalone functions that stage implementations import.
 
 ## Extensibility Examples
 
-**Swap preprocessor:** In `factory.py`, replace `BandPassFilter(...)` with `WaveletDenoiser(...)`.
+**Swap preprocessor:** In `factory.py`, replace `BandPassFilter(...)` with `WaveletDenoiser(...)`. Both write `PreprocessingResult`, so `BandPowerExtractor` doesn't care which one ran.
 
-**Add concentration scoring:** Add `ConcentrationScorer()` to the stages list in `factory.py`, add `concentration_score: float | None = None` to `PipelineFrame`.
+**Add concentration scoring:** Write `ConcentrationScorer` stage + `ConcentrationResult` dataclass. Add to factory. Add serializer block. No other files touched.
 
 **Add MQTT:** Uncomment `MQTTAction(...)` in `factory.py`.
 
-**Custom ONNX classifier:** Create a new `Stage` subclass using BrainFlow's `MLModel(USER_DEFINED)`, add to stages list.
+**Custom ONNX classifier:** Write a new `Stage` subclass using BrainFlow's `MLModel(USER_DEFINED)`, define its result dataclass, add to factory.
 
-**ZUNA integration:** Create a `ZunaPreprocessor(Stage)` that replaces `BandPassFilter` — runs ZUNA inference on raw EEG, writes enhanced signal to `eeg_filtered`.
+**ZUNA integration:** Write `ZunaPreprocessor(Stage)` that writes `PreprocessingResult`. Swap with `BandPassFilter` in factory. All downstream stages see filtered EEG the same way.
+
+## BrainFlow API Coverage
+
+Every BrainFlow function maps to exactly one stage. Swapping the underlying implementation never leaks beyond the stage boundary.
+
+| BrainFlow Function | Stage | Swap by... |
+|---|---|---|
+| `perform_bandpass`, `perform_bandstop`, `perform_highpass`, `perform_lowpass`, `remove_environmental_noise` | `BandPassFilter` | Replace stage with `WaveletDenoiser` or `ICAFilter` |
+| `perform_wavelet_denoising` | `WaveletDenoiser` | Replace stage with `BandPassFilter` |
+| `perform_rolling_filter` | `BandPowerExtractor` (config option for smoothing) | Change config param |
+| `get_psd_welch`, `get_band_power`, `detrend` | `BandPowerExtractor` | Replace stage with `WaveletFeatureExtractor` using wavelet decomposition |
+| `get_avg_band_powers`, `get_custom_band_powers` | `BandPowerExtractor` (alternative impl) | Swap internal implementation, same result type |
+| `detect_peaks_z_score` | `BlinkDetector`, `ClenchDetector` | Replace with custom threshold detector |
+| `perform_wavelet_transform`, `restore_data_from_wavelet_detailed_coeffs` | `WaveletFeatureExtractor` | Replace with `BandPowerExtractor` |
+| `perform_ica` | `ICAFilter` | Replace with `BandPassFilter` or `WaveletDenoiser` |
+| `get_csp` | `CSPClassifier` | Replace with `ConcentrationScorer` |
+| `get_railed_percentage`, `calc_stddev` | `SignalQualityChecker` | Swap internal implementation |
+| `get_heart_rate`, `get_oxygen_level` | `HeartRateExtractor` | Swap with custom PPG peak detection |
+| `MLModel(MINDFULNESS)`, `MLModel(RESTFULNESS)` | `ConcentrationScorer` | Swap with custom ONNX model |
+| `MLModel(USER_DEFINED)` | Any custom stage | — |
