@@ -8,13 +8,13 @@ import {
   ELECTRODES_23CH,
   sphericalToCartesian,
   type ElectrodePosition,
-} from "~/lib/electrodes";
+} from "../lib/electrodes";
 import {
   computeInterpolationWeights,
   interpolateToVertices,
-} from "~/lib/interpolation";
-import type { BandPowers } from "~/lib/protocol";
-import { extractBandValues, type BandName } from "~/hooks/useBandPowers";
+} from "../lib/interpolation";
+import type { BandPowers } from "../lib/protocol";
+import { extractBandValues, type BandName } from "../hooks/useBandPowers";
 
 // --- Color scale: blue → cyan → green → yellow → red ---
 const COLOR_STOPS = [

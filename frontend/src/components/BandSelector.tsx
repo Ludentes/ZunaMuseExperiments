@@ -1,4 +1,4 @@
-import type { BandName } from "~/hooks/useBandPowers";
+import type { BandName } from "../hooks/useBandPowers";
 
 const BANDS: { name: BandName; label: string }[] = [
   { name: "focus", label: "FOCUS" },

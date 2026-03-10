@@ -1,9 +1,13 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useSensorStream } from "../hooks/useSensorStream";
 import { useMetrics } from "../hooks/useMetrics";
+import { useBandPowers, type BandName } from "../hooks/useBandPowers";
 import { EEGWaveformPanel } from "../components/EEGWaveformPanel";
 import { FitTool } from "../components/FitTool";
 import { BrainMetrics } from "../components/BrainMetrics";
+import { BrainHeatmap } from "../components/BrainHeatmap";
+import { BandSelector } from "../components/BandSelector";
 import { VitalsPanel } from "../components/VitalsPanel";
 import { MotionPanel } from "../components/MotionPanel";
 import { ControlsPanel } from "../components/ControlsPanel";
@@ -16,6 +20,8 @@ export const Route = createFileRoute("/")({
 function Dashboard() {
   const { buffers, metricsRef, isConnected, sendCommand } = useSensorStream();
   const metrics = useMetrics(metricsRef);
+  const { getBandPowers } = useBandPowers(metrics);
+  const [selectedBand, setSelectedBand] = useState<BandName>("focus");
 
   return (
     <div className="min-h-screen p-2 space-y-2" style={{ background: "var(--bg-base)", color: "var(--text-primary)" }}>
@@ -43,8 +49,16 @@ function Dashboard() {
       {/* EEG Waveforms */}
       <EEGWaveformPanel buffersRef={buffers} />
 
-      {/* Bottom panels: metrics + vitals/motion side by side */}
-      <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: "var(--gap)" }}>
+      {/* Bottom panels: heatmap + metrics + vitals/motion */}
+      <div className="grid grid-cols-1 lg:grid-cols-3" style={{ gap: "var(--gap)" }}>
+        <div>
+          <BrainHeatmap
+            bandPowers={getBandPowers()}
+            selectedBand={selectedBand}
+            height={280}
+          />
+          <BandSelector selected={selectedBand} onSelect={setSelectedBand} />
+        </div>
         <BrainMetrics
           bandPowers={metrics?.eeg?.band_powers}
           thetaBetaRatio={metrics?.eeg?.theta_beta_ratio}

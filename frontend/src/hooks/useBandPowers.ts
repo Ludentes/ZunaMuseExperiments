@@ -1,5 +1,5 @@
 import { useRef, useCallback } from "react";
-import type { Metrics, BandPowers } from "~/lib/protocol";
+import type { Metrics, BandPowers } from "../lib/protocol";
 
 export type BandName = "delta" | "theta" | "alpha" | "beta" | "gamma" | "focus";
 
@@ -20,7 +20,7 @@ export function extractBandValues(
   band: BandName,
 ): Record<string, number> {
   const result: Record<string, number> = {};
-  for (const [ch, bands] of Object.entries(bp.channels)) {
+  for (const [ch, bands] of Object.entries(bp.channels) as [string, Record<string, number>][]) {
     if (band === "focus") {
       const theta = bands.theta ?? 0;
       const beta = bands.beta ?? 1;
