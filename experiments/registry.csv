@@ -1,0 +1,4 @@
+id,name,timestamp,git_sha,tags,best_f1,best_precision,best_recall,best_threshold,fp_rest,fp_clench,fp_talk
+20260309-121734-blink-v5-wide-hf,blink-v5-wide-hf,20260309-121734,2a6d0da,blink;hf-window-128,0.95,0.95,0.95,-75,0,1,1
+20260309-123847-rest-new-session,rest-new-session,20260309-123847,e0dd8e7,rest,0.95,0.95,0.95,-75,0,1,1
+20260309-124601-blink-new-session,blink-new-session,20260309-124601,e0dd8e7,blink;new-data,0.9455,0.963,0.9286,-75,0,1,1

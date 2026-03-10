@@ -1,0 +1,9 @@
+{
+  "best_f1": 0.95,
+  "best_precision": 0.95,
+  "best_recall": 0.95,
+  "best_threshold": -75,
+  "fp_rest": 0,
+  "fp_clench": 1,
+  "fp_talk": 1
+}

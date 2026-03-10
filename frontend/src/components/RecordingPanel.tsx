@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 /** Protocol config per label */
 interface Protocol {
@@ -8,6 +8,7 @@ interface Protocol {
   reps: number;           // number of trials
   restBetween: number;    // rest between trials (seconds)
   instruction: string;    // what to tell the user
+  flickerHz?: number;     // SSVEP: flicker frequency in Hz (undefined = no flicker)
 }
 
 const PROTOCOLS: Protocol[] = [
@@ -20,6 +21,24 @@ const PROTOCOLS: Protocol[] = [
   { label: "eyebrow_raise",trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Raise both eyebrows at the cue" },
   { label: "eyebrow_furrow",trialDuration: 3, cueAt: 1,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
   { label: "talk",         trialDuration: 5, cueAt: 0.5, reps: 10, restBetween: 2, instruction: "Say any word at the cue" },
+  { label: "eyes_closed",  trialDuration: 30, cueAt: 0,  reps: 3,  restBetween: 5, instruction: "Close eyes, relax — keep still" },
+  { label: "eyes_open",    trialDuration: 30, cueAt: 0,  reps: 3,  restBetween: 5, instruction: "Eyes open, stare at screen — keep still" },
+  // Experiment A: Engagement/attention
+  { label: "meditation",   trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Close eyes, slow breathing, count breaths" },
+  { label: "mental_math",  trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Count backwards from 1000 by 7s (eyes open)" },
+  // Experiment B: SSVEP — visual flicker stimulus
+  { label: "ssvep_7hz",    trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 7.5 },
+  { label: "ssvep_10hz",   trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 10 },
+  { label: "ssvep_6hz",    trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 6 },
+  { label: "ssvep_15hz",   trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 15 },
+  { label: "ssvep_none",   trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the static pattern (control)", flickerHz: 0 },
+  // Experiment C: Fz neurofeedback validation
+  { label: "drowsy",       trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Eyes closed, let your mind wander — don't try to focus" },
+  // Experiment D: Low-frequency photic driving validation
+  { label: "flicker_3hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 3 },
+  { label: "flicker_4hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 4 },  // 4Hz: 7.5 frames/half — slight jitter but still usable
+  { label: "flicker_5hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 5 },
+  { label: "flicker_6hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 6 },
 ];
 
 type SessionState =
@@ -33,6 +52,135 @@ interface Props {
   isConnected: boolean;
   sendCommand: (cmd: Record<string, unknown>) => void;
 }
+
+/**
+ * SSVEP flicker overlay — renders a full-screen checkerboard that flickers at the target Hz.
+ *
+ * Timing: Uses absolute time reference (no drift accumulation).
+ * The state at any moment is determined by Math.floor(elapsed / halfPeriodMs) % 2,
+ * so frame drops and rAF jitter don't affect long-term frequency accuracy.
+ *
+ * Monitor constraint: Flicker frequency must divide evenly into half the refresh rate.
+ * At 60Hz, clean frequencies are: 1, 2, 3, 4, 5, 6, 7.5, 10, 15, 30 Hz.
+ * 12Hz CANNOT be displayed cleanly on 60Hz (needs 120Hz monitor).
+ */
+const SSVEPFlicker = React.memo(function SSVEPFlicker({ hz, active }: { hz: number; active: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const frameRef = useRef(0);
+
+  useEffect(() => {
+    if (!active || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const isStatic = hz === 0;
+    const halfPeriodMs = isStatic ? Infinity : 500 / hz;
+    const startTime = performance.now();
+    let lastDrawnState: boolean | null = null;
+
+    // Measure refresh rate and warn about incompatible frequencies
+    let measureCount = 0;
+    const measureStart = performance.now();
+
+    const drawCheckerboard = (on: boolean) => {
+      const w = canvas.width;
+      const h = canvas.height;
+      const cellSize = 80;
+      const white = on ? "#ffffff" : "#000000";
+      const black = on ? "#000000" : "#ffffff";
+
+      for (let y = 0; y < h; y += cellSize) {
+        for (let x = 0; x < w; x += cellSize) {
+          const col = Math.floor(x / cellSize);
+          const row = Math.floor(y / cellSize);
+          ctx.fillStyle = ((col + row) % 2) === 0 ? white : black;
+          ctx.fillRect(x, y, cellSize, cellSize);
+        }
+      }
+
+      // Red fixation cross at center
+      ctx.fillStyle = "#ff0000";
+      const cx = w / 2;
+      const cy = h / 2;
+      ctx.fillRect(cx - 15, cy - 2, 30, 4);
+      ctx.fillRect(cx - 2, cy - 15, 4, 30);
+    };
+
+    const draw = () => {
+      const now = performance.now();
+
+      // Log refresh rate warning once after 10 frames (skip for static)
+      if (!isStatic) {
+        measureCount++;
+        if (measureCount === 10) {
+          const avgFrameMs = (now - measureStart) / measureCount;
+          const refreshRate = Math.round(1000 / avgFrameMs);
+          const framesPerHalfCycle = halfPeriodMs / avgFrameMs;
+          const remainder = Math.abs(framesPerHalfCycle - Math.round(framesPerHalfCycle));
+          if (remainder > 0.1) {
+            console.warn(
+              `SSVEP: ${hz}Hz cannot be displayed cleanly at ${refreshRate}Hz refresh. ` +
+              `Frames per half-cycle: ${framesPerHalfCycle.toFixed(2)} (need near-integer).`
+            );
+          } else {
+            console.info(`SSVEP: ${hz}Hz OK at ${refreshRate}Hz refresh (${framesPerHalfCycle.toFixed(1)} frames/half-cycle)`);
+          }
+        }
+      }
+
+      // Absolute time determines state — no drift accumulation
+      const currentOn = isStatic ? true : (Math.floor((now - startTime) / halfPeriodMs) % 2) === 0;
+
+      // Only redraw when state changes (saves GPU)
+      if (currentOn !== lastDrawnState) {
+        lastDrawnState = currentOn;
+        drawCheckerboard(currentOn);
+      }
+
+      frameRef.current = requestAnimationFrame(draw);
+    };
+
+    // Size canvas to window (accounts for devicePixelRatio)
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = window.innerWidth + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.scale(dpr, dpr);
+      lastDrawnState = null; // force redraw after resize
+    };
+    resize();
+    window.addEventListener("resize", resize);
+
+    frameRef.current = requestAnimationFrame(draw);
+
+    return () => {
+      cancelAnimationFrame(frameRef.current);
+      window.removeEventListener("resize", resize);
+    };
+  }, [hz, active]);
+
+  if (!active) return null;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <canvas ref={canvasRef} />
+      <div style={{
+        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
+        background: "rgba(0,0,0,0.7)", color: "#fff", padding: "8px 16px",
+        fontFamily: "monospace", fontSize: 12,
+      }}>
+        SSVEP {hz > 0 ? `${hz}Hz` : "static control"} — fixate on red cross — press ESC to abort
+      </div>
+    </div>
+  );
+});
 
 /** Play a short beep via Web Audio API */
 function playBeep(freq: number = 880, durationMs: number = 100) {
@@ -200,6 +348,19 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
 
   const isActive = state.phase !== "idle" && state.phase !== "done";
 
+  // SSVEP overlay state (includes static control where flickerHz === 0)
+  const showFlicker = state.phase === "recording" && state.cued && protocol.flickerHz !== undefined;
+
+  // ESC key to abort during SSVEP
+  useEffect(() => {
+    if (!showFlicker) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") stopSession();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [showFlicker, stopSession]);
+
   return (
     <div
       className="p-3"
@@ -273,23 +434,25 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
             </span>
           </div>
 
-          {/* CUE indicator */}
-          <div
-            className="flex items-center justify-center py-3 rounded transition-all duration-100"
-            style={{
-              background: state.cued ? "var(--accent)" : "rgba(255,255,255,0.03)",
-              border: state.cued ? "2px solid var(--accent)" : "2px solid var(--border)",
-            }}
-          >
-            <span
-              className="text-2xl font-mono font-bold tracking-widest"
+          {/* CUE indicator — hide for long trials (>10s) after first 3 seconds to avoid distraction */}
+          {(!state.cued || state.elapsed < (protocol.cueAt + 3) || protocol.trialDuration <= 10) && (
+            <div
+              className="flex items-center justify-center py-3 rounded transition-all duration-100"
               style={{
-                color: state.cued ? "var(--bg-base)" : "var(--text-dim)",
+                background: state.cued ? "var(--accent)" : "rgba(255,255,255,0.03)",
+                border: state.cued ? "2px solid var(--accent)" : "2px solid var(--border)",
               }}
             >
-              {state.cued ? protocol.instruction.toUpperCase() : "WAIT..."}
-            </span>
-          </div>
+              <span
+                className="text-2xl font-mono font-bold tracking-widest"
+                style={{
+                  color: state.cued ? "var(--bg-base)" : "var(--text-dim)",
+                }}
+              >
+                {state.cued ? protocol.instruction.toUpperCase() : "WAIT..."}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -371,6 +534,11 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           </button>
         )}
       </div>
+
+      {/* SSVEP flicker overlay (including static control at hz=0) */}
+      {protocol.flickerHz !== undefined && (
+        <SSVEPFlicker hz={protocol.flickerHz} active={showFlicker} />
+      )}
     </div>
   );
 }

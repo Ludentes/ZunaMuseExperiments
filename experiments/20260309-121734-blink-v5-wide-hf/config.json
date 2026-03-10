@@ -1,0 +1,26 @@
+{
+  "id": "20260309-121734-blink-v5-wide-hf",
+  "name": "blink-v5-wide-hf",
+  "timestamp": "20260309-121734",
+  "tags": [
+    "blink",
+    "hf-window-128"
+  ],
+  "git_sha": "2a6d0da",
+  "git_dirty": true,
+  "params": {
+    "threshold_uv": -75,
+    "threshold_sd": 4.0,
+    "max_hf_ratio": 3.5,
+    "hf_window_samples": 128,
+    "max_deflection_ms": 200,
+    "refractory_ms": 300,
+    "classify_window_ms": 800,
+    "n_rest": 20,
+    "n_single": 20,
+    "n_double": 20,
+    "n_clench": 20,
+    "n_talk": 13
+  },
+  "elapsed_s": 0.0
+}
