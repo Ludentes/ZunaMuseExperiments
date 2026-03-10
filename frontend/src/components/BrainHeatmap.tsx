@@ -16,6 +16,9 @@ import {
 import type { BandPowers } from "../lib/protocol";
 import { extractBandValues, type BandName } from "../hooks/useBandPowers";
 
+// Scratch objects reused per frame (avoid GC pressure at 60fps)
+const _scratchColor = new THREE.Color();
+
 // --- Color scale: blue → cyan → green → yellow → red ---
 const COLOR_STOPS = [
   new THREE.Color(0x0000ff), // 0.0 blue
@@ -118,6 +121,8 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) 
     );
   }, [geometry, electrodes]);
 
+  // Pre-allocated buffers (reused every frame to avoid GC)
+  const interpBufRef = useRef<Float32Array | null>(null);
   // State for EMA smoothing and baseline
   const smoothedRef = useRef<Float32Array | null>(null);
   const baselineRef = useRef<BaselineState>({
@@ -157,8 +162,11 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) 
       updateBaseline(baselineRef.current, electrodeValues);
     }
 
-    // Interpolate to vertices
-    const raw = interpolateToVertices(weights, electrodeValues, numVerts);
+    // Interpolate to vertices (reuse buffer)
+    if (!interpBufRef.current || interpBufRef.current.length !== numVerts) {
+      interpBufRef.current = new Float32Array(numVerts);
+    }
+    const raw = interpolateToVertices(weights, electrodeValues, numVerts, interpBufRef.current);
 
     // EMA smoothing
     if (!smoothedRef.current || smoothedRef.current.length !== numVerts) {
@@ -171,7 +179,6 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) 
     }
 
     // Apply color map
-    const color = new THREE.Color();
     const colors = colorAttr.array as Float32Array;
     const s = smoothedRef.current!;
 
@@ -179,10 +186,10 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) 
       const normalized = debug
         ? s[i]  // debug modes are already 0-1
         : normalize(s[i], baselineRef.current);
-      valueToColor(normalized, color);
-      colors[i * 3] = color.r;
-      colors[i * 3 + 1] = color.g;
-      colors[i * 3 + 2] = color.b;
+      valueToColor(normalized, _scratchColor);
+      colors[i * 3] = _scratchColor.r;
+      colors[i * 3 + 1] = _scratchColor.g;
+      colors[i * 3 + 2] = _scratchColor.b;
     }
 
     colorAttr.needsUpdate = true;
@@ -217,8 +224,15 @@ function ElectrodeDots({ electrodes }: { electrodes: ElectrodePosition[] }) {
   const positions = useMemo(
     () => electrodes.map((e) => {
       const [x, y, z] = sphericalToCartesian(e.theta, e.phi);
-      // Scale to head radius + small offset
-      return new THREE.Vector3(x * 1.02, y * 1.15 * 1.02, z * 1.02);
+      // Match head mesh transforms: elongate y, flatten back
+      const sy = y * 1.15;
+      let sz = z;
+      if (sz < -0.3) {
+        const factor = 1 - 0.15 * Math.abs(sz + 0.3);
+        sz = sz * Math.max(factor, 0.85);
+      }
+      // Small offset to sit on surface
+      return new THREE.Vector3(x * 1.02, sy * 1.02, sz * 1.02);
     }),
     [electrodes],
   );

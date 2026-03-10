@@ -62,9 +62,10 @@ export function interpolateToVertices(
   weights: Float32Array,
   electrodeValues: number[],
   numVertices: number,
+  out?: Float32Array,
 ): Float32Array {
   const numElec = electrodeValues.length;
-  const result = new Float32Array(numVertices);
+  const result = out && out.length === numVertices ? out : new Float32Array(numVertices);
 
   for (let v = 0; v < numVertices; v++) {
     let val = 0;

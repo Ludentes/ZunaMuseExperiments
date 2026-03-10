@@ -1,9 +1,7 @@
 from dataclasses import dataclass, field
 from backend.pipeline.base import Stage
-from backend.pipeline.types import Cadence, PipelineFrame, CH_NAMES
+from backend.pipeline.types import Cadence, PipelineFrame, CH_NAMES, BAND_NAMES
 from backend.pipeline.stages.features import BandPowerResult
-
-BAND_NAMES = ["delta", "theta", "alpha", "beta", "gamma"]
 
 
 @dataclass
