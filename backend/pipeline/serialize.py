@@ -6,6 +6,7 @@ add one `if` block here.
 """
 from __future__ import annotations
 
+from backend.pipeline.stages.band_power_broadcaster import BandPowerMessage
 from backend.pipeline.stages.detectors import ClenchResult
 from backend.pipeline.stages.features import (
     BandPowerResult,
@@ -56,6 +57,13 @@ def frame_to_metrics(frame: PipelineFrame) -> dict:
             "head_pose": {"pitch": hm.head_pose[0], "roll": hm.head_pose[1]},
             "motion_artifact": hm.motion_artifact,
             "jaw_clench": cl.jaw_clench if cl else False,
+        }
+
+    bpm = frame.get(BandPowerMessage)
+    if bpm:
+        metrics["band_powers"] = {
+            "mode": bpm.mode,
+            "channels": bpm.channels,
         }
 
     return metrics

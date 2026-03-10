@@ -15,6 +15,7 @@ from backend.pipeline.stages.features import (
     HeartRateExtractor,
     SignalQualityChecker,
 )
+from backend.pipeline.stages.band_power_broadcaster import BandPowerBroadcaster
 from backend.pipeline.stages.preprocessing import WaveletDenoiser
 
 
@@ -27,6 +28,7 @@ def create_default_pipeline() -> Pipeline:
         HeartRateExtractor(),
         HeadMotionExtractor(),
         ConcentrationScorer(),
+        BandPowerBroadcaster(),
         # FAST — event detection (SpeechDetector must precede BlinkDetector)
         SpeechDetector(),
         BlinkDetector(),
