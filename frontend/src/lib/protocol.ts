@@ -31,9 +31,15 @@ export function getChannel(frame: DecodedFrame, channelIndex: number): Float32Ar
   return frame.data.subarray(offset, offset + frame.samples);
 }
 
+export interface BandPowers {
+  mode: "4ch" | "23ch";
+  channels: Record<string, Record<string, number>>;
+}
+
 export interface Metrics {
   type: "metrics";
   timestamp: number;
+  band_powers?: BandPowers;
   eeg?: {
     band_powers: Record<string, number[]>;
     theta_beta_ratio: number[];
