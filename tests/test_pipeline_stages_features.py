@@ -150,12 +150,62 @@ def test_concentration_scorer():
     from backend.pipeline.stages.features import BandPowerExtractor
     # Need band powers first
     BandPowerExtractor().process(frame)
-    scorer = ConcentrationScorer()
+    scorer = ConcentrationScorer(use_raw_ratio=False)
     try:
         scorer.process(frame)
         cr = frame.get(ConcentrationResult)
         assert cr is not None
         assert 0.0 <= cr.concentration_score <= 1.0
         assert 0.0 <= cr.relaxation_score <= 1.0
+    finally:
+        scorer.release()
+
+
+def test_concentration_raw_ratio_focused():
+    """Low theta/beta ratio should produce high concentration."""
+    from backend.pipeline.stages.features import ConcentrationScorer, ConcentrationResult
+    frame = _make_eeg_frame(512)
+    frame.set(BandPowerResult(
+        band_powers={
+            "delta": [100.0] * 4,
+            "theta": [5.0, 5.0, 5.0, 5.0],
+            "alpha": [10.0] * 4,
+            "beta": [20.0, 20.0, 20.0, 20.0],
+            "gamma": [5.0] * 4,
+        },
+        theta_beta_ratio=[0.25] * 4,
+        frontal_alpha_asymmetry=0.0,
+    ))
+    scorer = ConcentrationScorer(use_raw_ratio=True)
+    try:
+        scorer.process(frame)
+        cr = frame.get(ConcentrationResult)
+        assert cr is not None
+        assert cr.concentration_score > 0.6, f"Expected >0.6 for focused state, got {cr.concentration_score}"
+    finally:
+        scorer.release()
+
+
+def test_concentration_raw_ratio_relaxed():
+    """High theta/beta ratio should produce low concentration."""
+    from backend.pipeline.stages.features import ConcentrationScorer, ConcentrationResult
+    frame = _make_eeg_frame(512)
+    frame.set(BandPowerResult(
+        band_powers={
+            "delta": [100.0] * 4,
+            "theta": [40.0, 40.0, 40.0, 40.0],
+            "alpha": [10.0] * 4,
+            "beta": [5.0, 5.0, 5.0, 5.0],
+            "gamma": [2.0] * 4,
+        },
+        theta_beta_ratio=[8.0] * 4,
+        frontal_alpha_asymmetry=0.0,
+    ))
+    scorer = ConcentrationScorer(use_raw_ratio=True)
+    try:
+        scorer.process(frame)
+        cr = frame.get(ConcentrationResult)
+        assert cr is not None
+        assert cr.concentration_score < 0.3, f"Expected <0.3 for relaxed state, got {cr.concentration_score}"
     finally:
         scorer.release()

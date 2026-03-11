@@ -370,7 +370,7 @@ class HeadMotionExtractor(Stage):
 
 @dataclass
 class ConcentrationResult:
-    concentration_score: float   # 0.0 - 1.0 (from MINDFULNESS model)
+    concentration_score: float   # 0.0 - 1.0
     relaxation_score: float      # 0.0 - 1.0 (from RESTFULNESS model)
 
 
@@ -378,19 +378,29 @@ class ConcentrationScorer(Stage):
     name = "concentration_scorer"
     cadence = Cadence.SLOW
 
-    def __init__(self):
+    def __init__(self, use_raw_ratio: bool = True):
+        """
+        Args:
+            use_raw_ratio: If True, use frontal theta/beta ratio for concentration
+                          instead of BrainFlow MINDFULNESS model (which gives inverted results).
+                          RESTFULNESS model is always used for relaxation.
+        """
+        self.use_raw_ratio = use_raw_ratio
         from brainflow.ml_model import MLModel, BrainFlowModelParams, BrainFlowMetrics, BrainFlowClassifiers
-        mind_params = BrainFlowModelParams(BrainFlowMetrics.MINDFULNESS, BrainFlowClassifiers.DEFAULT_CLASSIFIER)
+
+        if not use_raw_ratio:
+            mind_params = BrainFlowModelParams(BrainFlowMetrics.MINDFULNESS, BrainFlowClassifiers.DEFAULT_CLASSIFIER)
+            self._mindfulness = MLModel(mind_params)
+            try:
+                self._mindfulness.release()
+            except Exception:
+                pass
+            self._mindfulness.prepare()
+        else:
+            self._mindfulness = None
+
         rest_params = BrainFlowModelParams(BrainFlowMetrics.RESTFULNESS, BrainFlowClassifiers.DEFAULT_CLASSIFIER)
-        self._mindfulness = MLModel(mind_params)
         self._restfulness = MLModel(rest_params)
-        # BrainFlow MLModel is process-global; release first to avoid
-        # ANOTHER_CLASSIFIER_IS_PREPARED_ERROR when re-creating the stage.
-        try:
-            self._mindfulness.release()
-        except Exception:
-            pass
-        self._mindfulness.prepare()
         try:
             self._restfulness.release()
         except Exception:
@@ -399,10 +409,11 @@ class ConcentrationScorer(Stage):
 
     def release(self):
         """Release BrainFlow ML models (call on shutdown)."""
-        try:
-            self._mindfulness.release()
-        except Exception:
-            pass
+        if self._mindfulness:
+            try:
+                self._mindfulness.release()
+            except Exception:
+                pass
         try:
             self._restfulness.release()
         except Exception:
@@ -413,9 +424,51 @@ class ConcentrationScorer(Stage):
         if bp is None:
             return
 
-        # MLModel expects normalized band powers as input
-        # get_custom_band_powers returns relative powers, but we have absolute
-        # Use our band powers and normalize them
+        # --- Concentration ---
+        if self.use_raw_ratio:
+            # Use frontal theta/beta ratio directly
+            # Find AF7/AF8 indices
+            ch_names = list(CH_NAMES)
+            n_channels = len(bp.band_powers.get("theta", []))
+            if n_channels > len(CH_NAMES):
+                from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
+                ch_names = ZUNA_CH_NAMES
+            af7_idx = ch_names.index("AF7") if "AF7" in ch_names else 1
+            af8_idx = ch_names.index("AF8") if "AF8" in ch_names else 2
+
+            theta = bp.band_powers.get("theta", [0.0] * 4)
+            beta = bp.band_powers.get("beta", [0.0] * 4)
+
+            if af7_idx < len(theta) and af8_idx < len(theta):
+                frontal_theta = (theta[af7_idx] + theta[af8_idx]) / 2
+                frontal_beta = (beta[af7_idx] + beta[af8_idx]) / 2
+                raw_ratio = frontal_theta / frontal_beta if frontal_beta > 0 else 5.0
+            else:
+                raw_ratio = 2.5  # neutral default
+
+            # Map ratio to 0-1: high ratio = relaxed (high theta), low ratio = focused (high beta)
+            # Typical observed range: ~1.0 (focused) to ~5.0 (relaxed)
+            # Invert so concentration=1.0 when focused (low ratio)
+            concentration = max(0.0, min(1.0, 1.0 - (raw_ratio - 1.0) / 4.0))
+        else:
+            # BrainFlow MINDFULNESS model (known to give inverted results)
+            band_names_ordered = ["delta", "theta", "alpha", "beta", "gamma"]
+            total = 0.0
+            sums = []
+            for b in band_names_ordered:
+                s = sum(bp.band_powers.get(b, [0.0]))
+                sums.append(s)
+                total += s
+            if total <= 0:
+                return
+            features = np.array([s / total for s in sums], dtype=np.float64)
+            try:
+                result = self._mindfulness.predict(features)
+                concentration = float(result.item() if hasattr(result, 'item') else result)
+            except Exception:
+                concentration = 0.0
+
+        # --- Relaxation (RESTFULNESS model always) ---
         band_names_ordered = ["delta", "theta", "alpha", "beta", "gamma"]
         total = 0.0
         sums = []
@@ -423,18 +476,9 @@ class ConcentrationScorer(Stage):
             s = sum(bp.band_powers.get(b, [0.0]))
             sums.append(s)
             total += s
-
         if total <= 0:
             return
-
         features = np.array([s / total for s in sums], dtype=np.float64)
-
-        try:
-            result = self._mindfulness.predict(features)
-            concentration = float(result.item() if hasattr(result, 'item') else result)
-        except Exception:
-            concentration = 0.0
-
         try:
             result = self._restfulness.predict(features)
             relaxation = float(result.item() if hasattr(result, 'item') else result)
