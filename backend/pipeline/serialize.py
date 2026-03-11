@@ -11,6 +11,7 @@ from backend.pipeline.stages.detectors import ClenchResult
 from backend.pipeline.stages.features import (
     BandPowerResult,
     ConcentrationResult,
+    EyesClosedResult,
     HeadMotionResult,
     HeartRateResult,
     SignalQualityResult,
@@ -57,6 +58,14 @@ def frame_to_metrics(frame: PipelineFrame) -> dict:
             "head_pose": {"pitch": hm.head_pose[0], "roll": hm.head_pose[1]},
             "motion_artifact": hm.motion_artifact,
             "jaw_clench": cl.jaw_clench if cl else False,
+        }
+
+    ec = frame.get(EyesClosedResult)
+    if ec:
+        metrics["eyes_closed"] = {
+            "active": ec.eyes_closed,
+            "alpha_ratio": ec.alpha_ratio,
+            "baseline_alpha": ec.baseline_alpha,
         }
 
     bpm = frame.get(BandPowerMessage)

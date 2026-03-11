@@ -63,3 +63,15 @@ def test_imu_jaw_clench_defaults_false():
     frame.set(HeadMotionResult(head_movement=0.02, head_pose=(0.0, 0.0), motion_artifact=False))
     metrics = frame_to_metrics(frame)
     assert metrics["imu"]["jaw_clench"] is False
+
+
+from backend.pipeline.stages.features import EyesClosedResult
+
+
+def test_serialize_eyes_closed_result():
+    frame = PipelineFrame(eeg=None, ppg=None, imu=None, timestamp=0.0)
+    frame.set(EyesClosedResult(eyes_closed=True, alpha_ratio=2.1, baseline_alpha=12.5))
+    metrics = frame_to_metrics(frame)
+    assert "eyes_closed" in metrics
+    assert metrics["eyes_closed"]["active"] is True
+    assert metrics["eyes_closed"]["alpha_ratio"] == 2.1

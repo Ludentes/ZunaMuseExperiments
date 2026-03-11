@@ -11,6 +11,7 @@ from backend.pipeline.stages.detectors import BlinkDetector, ClenchDetector, Spe
 from backend.pipeline.stages.features import (
     BandPowerExtractor,
     ConcentrationScorer,
+    EyesClosedDetector,
     HeadMotionExtractor,
     HeartRateExtractor,
     SignalQualityChecker,
@@ -19,7 +20,11 @@ from backend.pipeline.stages.band_power_broadcaster import BandPowerBroadcaster
 from backend.pipeline.stages.preprocessing import WaveletDenoiser
 
 
-def create_default_pipeline(zuna_enabled: bool = False, zuna_device: str = "cuda") -> Pipeline:
+def create_default_pipeline(
+    zuna_enabled: bool = False,
+    zuna_device: str = "cuda",
+    zuna_diffusion_steps: int = 50,
+) -> Pipeline:
     stages: list = [
         # SLOW — spectral features, vitals
         WaveletDenoiser(),
@@ -28,7 +33,7 @@ def create_default_pipeline(zuna_enabled: bool = False, zuna_device: str = "cuda
     # ZUNA: insert before band power extraction so it can replace 4ch with 23ch
     if zuna_enabled:
         from backend.pipeline.stages.zuna import ZunaStage
-        stages.append(ZunaStage(device=zuna_device))
+        stages.append(ZunaStage(device=zuna_device, diffusion_steps=zuna_diffusion_steps))
 
     stages.extend([
         BandPowerExtractor(),
@@ -36,6 +41,7 @@ def create_default_pipeline(zuna_enabled: bool = False, zuna_device: str = "cuda
         HeartRateExtractor(),
         HeadMotionExtractor(),
         ConcentrationScorer(),
+        EyesClosedDetector(),
         BandPowerBroadcaster(),
         # FAST — event detection (SpeechDetector must precede BlinkDetector)
         SpeechDetector(),
