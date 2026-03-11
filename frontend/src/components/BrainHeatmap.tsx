@@ -13,6 +13,7 @@ import {
   computeInterpolationWeights,
   interpolateToVertices,
 } from "../lib/interpolation";
+import { fbm3 } from "../lib/noise";
 import type { BandPowers } from "../lib/protocol";
 import { extractBandValues, type BandName } from "../hooks/useBandPowers";
 
@@ -87,34 +88,91 @@ interface HeadMeshProps {
   selectedBand: BandName;
   debug?: "static" | "wave" | "random";
   onStats?: (stats: HeatmapStats) => void;
+  onMeshReady?: (mesh: THREE.Mesh | null) => void;
 }
 
-function HeadMesh({ bandPowers, selectedBand, debug, onStats }: HeadMeshProps) {
+function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: HeadMeshProps) {
   const statsThrottleRef = useRef(0);
   const meshRef = useRef<THREE.Mesh>(null);
+  const meshReadyRef = useRef(false);
 
-  // Build geometry once
+  // Build brain-like geometry once
   const geometry = useMemo(() => {
-    const geo = new THREE.SphereGeometry(1, 48, 32);
-    // Slightly elongate vertically, flatten back
+    const geo = new THREE.SphereGeometry(1, 64, 48);
     const pos = geo.attributes.position;
+    const normal = geo.attributes.normal;
+
     for (let i = 0; i < pos.count; i++) {
+      let x = pos.getX(i);
       let y = pos.getY(i);
-      const z = pos.getZ(i);
-      y *= 1.15; // taller
-      // Flatten back slightly
-      if (z < -0.3) {
-        const factor = 1 - 0.15 * Math.abs(z + 0.3);
-        pos.setZ(i, z * Math.max(factor, 0.85));
+      let z = pos.getZ(i);
+
+      // 1. Brain shape: wider than tall, elongated front-to-back
+      x *= 0.85;   // narrower left-right
+      y *= 1.05;   // slightly taller
+      z *= 0.95;   // slightly shorter front-back
+
+      // 2. Flatten underside (brain base is flat, not spherical)
+      if (y < -0.3) {
+        y = -0.3 + (y + 0.3) * 0.3; // compress below -0.3
       }
-      pos.setY(i, y);
+
+      // 3. Interhemispheric fissure (midline groove)
+      const midlineDist = Math.abs(x);
+      if (midlineDist < 0.15 && y > 0.1) {
+        const fissureDepth = 0.08 * (1 - midlineDist / 0.15) * Math.max(0, (y - 0.1) / 0.9);
+        const nx = normal.getX(i);
+        const ny = normal.getY(i);
+        const nz = normal.getZ(i);
+        // Push inward along normal
+        x -= nx * fissureDepth;
+        y -= ny * fissureDepth;
+        z -= nz * fissureDepth;
+      }
+
+      // 4. Sulci via fBm noise displacement along normal
+      const noiseScale = 3.5;
+      const noiseAmp = 0.06;
+      const n = fbm3(x * noiseScale, y * noiseScale, z * noiseScale, 4, 2.2, 0.5);
+      const nx = normal.getX(i);
+      const ny = normal.getY(i);
+      const nz = normal.getZ(i);
+      // Only displace inward (sulci are grooves, not bumps)
+      const displacement = Math.min(0, n) * noiseAmp;
+      x += nx * displacement;
+      y += ny * displacement;
+      z += nz * displacement;
+
+      // 5. Frontal lobe bulge
+      if (z > 0.4 && y > -0.1) {
+        const bulge = 0.08 * Math.max(0, (z - 0.4) / 0.6) * Math.max(0, (y + 0.1) / 1.1);
+        z += bulge;
+      }
+
+      // 6. Temporal lobe bulge (sides, lower)
+      if (Math.abs(x) > 0.5 && y < 0.2 && z > -0.2) {
+        const side = (Math.abs(x) - 0.5) / 0.5;
+        const vert = Math.max(0, (0.2 - y) / 0.5);
+        const tbulge = 0.06 * side * vert;
+        x += Math.sign(x) * tbulge;
+      }
+
+      // 7. Occipital roundness (back)
+      if (z < -0.5 && y > -0.1) {
+        const backness = (-0.5 - z) / 0.5;
+        const obulge = 0.05 * Math.min(1, backness);
+        z -= obulge;
+      }
+
+      pos.setXYZ(i, x, y, z);
     }
+
     pos.needsUpdate = true;
     geo.computeVertexNormals();
 
     // Add vertex colors
     const colors = new Float32Array(pos.count * 3);
-    colors.fill(0.5); // neutral green-ish
+    colors.fill(0.5);
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
     return geo;
@@ -166,6 +224,12 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats }: HeadMeshProps) {
 
   // Update vertex colors each frame
   useFrame(({ clock }) => {
+    // Notify parent of mesh ref (once)
+    if (!meshReadyRef.current && meshRef.current && onMeshReady) {
+      meshReadyRef.current = true;
+      onMeshReady(meshRef.current);
+    }
+
     const colorAttr = geometry.attributes.color as THREE.BufferAttribute;
     const numVerts = colorAttr.count;
 
@@ -245,53 +309,52 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats }: HeadMeshProps) {
     <mesh ref={meshRef} geometry={geometry}>
       <meshStandardMaterial
         vertexColors
-        transparent
-        opacity={0.85}
-        roughness={0.3}
-        metalness={0.1}
+        roughness={0.7}
+        metalness={0.05}
         side={THREE.DoubleSide}
       />
     </mesh>
   );
 }
 
-// --- Nose indicator ---
-function NoseIndicator() {
-  return (
-    <mesh position={[0, -0.1, 1.05]} rotation={[Math.PI / 2, 0, 0]}>
-      <coneGeometry args={[0.08, 0.2, 8]} />
-      <meshStandardMaterial color="#888" />
-    </mesh>
-  );
-}
-
-// --- Electrode dots ---
-function ElectrodeDots({ electrodes }: { electrodes: ElectrodePosition[] }) {
-  const positions = useMemo(
-    () => electrodes.map((e) => {
+// --- Electrode dots (raycast onto brain surface) ---
+function ElectrodeDots({
+  electrodes,
+  brainMesh,
+}: {
+  electrodes: ElectrodePosition[];
+  brainMesh: THREE.Mesh | null;
+}) {
+  const positions = useMemo(() => {
+    return electrodes.map((e) => {
       const [x, y, z] = sphericalToCartesian(e.theta, e.phi);
-      // Match head mesh transforms: elongate y, flatten back
-      const sy = y * 1.15;
-      let sz = z;
-      if (sz < -0.3) {
-        const factor = 1 - 0.15 * Math.abs(sz + 0.3);
-        sz = sz * Math.max(factor, 0.85);
+      // Start from a point outside the brain, shoot inward
+      const dir = new THREE.Vector3(x, y, z).normalize();
+      const origin = dir.clone().multiplyScalar(2.0); // outside
+
+      if (brainMesh) {
+        const raycaster = new THREE.Raycaster(origin, dir.clone().negate());
+        const hits = raycaster.intersectObject(brainMesh);
+        if (hits.length > 0) {
+          // Offset slightly above surface
+          return hits[0].point.clone().add(dir.clone().multiplyScalar(0.02));
+        }
       }
-      // Small offset to sit on surface
-      return new THREE.Vector3(x * 1.02, sy * 1.02, sz * 1.02);
-    }),
-    [electrodes],
-  );
+
+      // Fallback: approximate position with brain shape transforms
+      return new THREE.Vector3(x * 0.87, y * 1.07, z * 0.97);
+    });
+  }, [electrodes, brainMesh]);
 
   return (
     <>
       {positions.map((pos, i) => (
         <mesh key={electrodes[i].name} position={pos}>
-          <sphereGeometry args={[0.03, 8, 8]} />
+          <sphereGeometry args={[0.025, 8, 8]} />
           <meshStandardMaterial
             color="#00ff88"
             emissive="#00ff88"
-            emissiveIntensity={0.5}
+            emissiveIntensity={0.6}
           />
         </mesh>
       ))}
@@ -407,6 +470,45 @@ function Disclaimer({ mode }: { mode: string }) {
   );
 }
 
+// --- Scene content (needs access to mesh ref) ---
+function BrainScene({
+  bandPowers,
+  selectedBand,
+  debug,
+  electrodes,
+  onStats,
+}: {
+  bandPowers: BandPowers | null;
+  selectedBand: BandName;
+  debug?: "static" | "wave" | "random";
+  electrodes: ElectrodePosition[];
+  onStats: (s: HeatmapStats) => void;
+}) {
+  const [brainMesh, setBrainMesh] = useState<THREE.Mesh | null>(null);
+
+  return (
+    <>
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[2, 4, 3]} intensity={0.7} />
+      <directionalLight position={[-2, 2, -1]} intensity={0.3} color="#aaccff" />
+      <HeadMesh
+        bandPowers={bandPowers}
+        selectedBand={selectedBand}
+        debug={debug}
+        onStats={onStats}
+        onMeshReady={setBrainMesh}
+      />
+      <ElectrodeDots electrodes={electrodes} brainMesh={brainMesh} />
+      <OrbitControls
+        enablePan={false}
+        enableZoom={false}
+        autoRotate
+        autoRotateSpeed={0.4}
+      />
+    </>
+  );
+}
+
 // --- Main component ---
 export interface BrainHeatmapProps {
   bandPowers: BandPowers | null;
@@ -435,24 +537,15 @@ export function BrainHeatmap({
   return (
     <div>
       <Canvas
-        style={{ height, background: "#111" }}
-        camera={{ position: [0, 0.5, 2.5], fov: 45 }}
+        style={{ height, background: "#0a0a0f" }}
+        camera={{ position: [0, 0.6, 2.2], fov: 42 }}
       >
-        <ambientLight intensity={0.4} />
-        <directionalLight position={[2, 3, 4]} intensity={0.8} />
-        <HeadMesh
+        <BrainScene
           bandPowers={bandPowers}
           selectedBand={selectedBand}
           debug={debug}
+          electrodes={electrodes}
           onStats={handleStats}
-        />
-        <NoseIndicator />
-        <ElectrodeDots electrodes={electrodes} />
-        <OrbitControls
-          enablePan={false}
-          enableZoom={false}
-          autoRotate
-          autoRotateSpeed={0.5}
         />
       </Canvas>
       <Legend selectedBand={selectedBand} stats={stats} />
