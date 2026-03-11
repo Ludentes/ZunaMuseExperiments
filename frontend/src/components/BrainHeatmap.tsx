@@ -1,5 +1,5 @@
 // frontend/src/components/BrainHeatmap.tsx
-import { useRef, useMemo } from "react";
+import { useRef, useMemo, useState, useCallback } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -66,15 +66,26 @@ function normalize(value: number, baseline: BaselineState): number {
   return (value - baseline.min) / (baseline.max - baseline.min);
 }
 
+// --- Stats for legend/debug overlay ---
+interface HeatmapStats {
+  baselineMin: number;
+  baselineMax: number;
+  baselineReady: boolean;
+  baselineSamples: number;
+  electrodeValues: Record<string, number>;  // current values per electrode
+}
+
 // --- Head mesh component ---
 interface HeadMeshProps {
   bandPowers: BandPowers | null;
   selectedBand: BandName;
   emaAlpha: number;
   debug?: "static" | "wave" | "random";
+  onStats?: (stats: HeatmapStats) => void;
 }
 
-function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) {
+function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug, onStats }: HeadMeshProps) {
+  const statsThrottleRef = useRef(0);
   const meshRef = useRef<THREE.Mesh>(null);
 
   // Build geometry once
@@ -193,6 +204,25 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug }: HeadMeshProps) 
     }
 
     colorAttr.needsUpdate = true;
+
+    // Report stats for legend (throttled to ~2Hz)
+    if (onStats) {
+      const now = clock.getElapsedTime();
+      if (now - statsThrottleRef.current > 0.5) {
+        statsThrottleRef.current = now;
+        const ev: Record<string, number> = {};
+        for (let e = 0; e < electrodes.length; e++) {
+          ev[electrodes[e].name] = electrodeValues[e];
+        }
+        onStats({
+          baselineMin: baselineRef.current.min,
+          baselineMax: baselineRef.current.max,
+          baselineReady: baselineRef.current.ready,
+          baselineSamples: baselineRef.current.samples,
+          electrodeValues: ev,
+        });
+      }
+    }
   });
 
   return (
@@ -253,6 +283,94 @@ function ElectrodeDots({ electrodes }: { electrodes: ElectrodePosition[] }) {
   );
 }
 
+// --- Color legend ---
+const BAND_LABELS: Record<string, string> = {
+  focus: "Focus (θ/β ratio)",
+  theta: "Theta (4–8 Hz)",
+  alpha: "Alpha (8–13 Hz)",
+  beta: "Beta (13–30 Hz)",
+  gamma: "Gamma (30–50 Hz)",
+  delta: "Delta (1–4 Hz)",
+};
+
+const BAND_UNITS: Record<string, string> = {
+  focus: "ratio",
+  theta: "µV²",
+  alpha: "µV²",
+  beta: "µV²",
+  gamma: "µV²",
+  delta: "µV²",
+};
+
+function Legend({
+  selectedBand,
+  stats,
+}: {
+  selectedBand: BandName;
+  stats: HeatmapStats | null;
+}) {
+  const label = BAND_LABELS[selectedBand] || selectedBand;
+  const unit = BAND_UNITS[selectedBand] || "";
+
+  // Color bar gradient matching the 5-stop scale
+  const gradient =
+    "linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)";
+
+  const minVal = stats ? stats.baselineMin.toFixed(1) : "—";
+  const maxVal = stats ? stats.baselineMax.toFixed(1) : "—";
+  const warmup = stats && !stats.baselineReady;
+
+  // Per-electrode values for debugging
+  const elecEntries = stats
+    ? Object.entries(stats.electrodeValues).sort(([a], [b]) => a.localeCompare(b))
+    : [];
+
+  return (
+    <div style={{ padding: "4px 8px", fontSize: "11px", color: "#aaa" }}>
+      <div style={{ fontWeight: "bold", marginBottom: "4px", color: "#ccc" }}>
+        {label}
+        {warmup && (
+          <span style={{ color: "#ff8800", marginLeft: "8px" }}>
+            ● warming up ({stats?.baselineSamples ?? 0}/5)
+          </span>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        <span>{minVal}</span>
+        <div
+          style={{
+            flex: 1,
+            height: "10px",
+            background: gradient,
+            borderRadius: "2px",
+            border: "1px solid #333",
+          }}
+        />
+        <span>{maxVal}</span>
+        <span style={{ color: "#666" }}>{unit}</span>
+      </div>
+      {elecEntries.length > 0 && (
+        <div
+          style={{
+            marginTop: "4px",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "2px 8px",
+            color: "#777",
+            fontFamily: "monospace",
+          }}
+        >
+          {elecEntries.map(([name, val]) => (
+            <span key={name}>
+              {name}:{val.toFixed(1)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Disclaimer ---
 function Disclaimer({ mode }: { mode: string }) {
   const text =
@@ -297,6 +415,8 @@ export function BrainHeatmap({
   }, [bandPowers?.mode]);
 
   const mode = bandPowers?.mode ?? "4ch";
+  const [stats, setStats] = useState<HeatmapStats | null>(null);
+  const handleStats = useCallback((s: HeatmapStats) => setStats(s), []);
 
   return (
     <div>
@@ -311,6 +431,7 @@ export function BrainHeatmap({
           selectedBand={selectedBand}
           emaAlpha={emaAlpha}
           debug={debug}
+          onStats={handleStats}
         />
         <NoseIndicator />
         <ElectrodeDots electrodes={electrodes} />
@@ -321,6 +442,7 @@ export function BrainHeatmap({
           autoRotateSpeed={0.5}
         />
       </Canvas>
+      <Legend selectedBand={selectedBand} stats={stats} />
       <Disclaimer mode={mode} />
     </div>
   );
