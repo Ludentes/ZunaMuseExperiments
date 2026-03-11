@@ -1,19 +1,9 @@
 // frontend/src/components/BrainHeatmap.tsx
-import { useRef, useMemo, useState, useCallback } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { useRef, useMemo, useState, useCallback, useEffect } from "react";
+import { Canvas, useFrame, useLoader } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import {
-  ELECTRODES_4CH,
-  ELECTRODES_23CH,
-  sphericalToCartesian,
-  type ElectrodePosition,
-} from "../lib/electrodes";
-import {
-  computeInterpolationWeights,
-  interpolateToVertices,
-} from "../lib/interpolation";
-import { fbm3 } from "../lib/noise";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { BandPowers } from "../lib/protocol";
 import { extractBandValues, type BandName } from "../hooks/useBandPowers";
 
@@ -52,14 +42,10 @@ function updateBaseline(state: BaselineState, values: number[]): void {
       state.min = v;
       state.max = v;
     } else {
-      const expandAlpha = state.samples < 30 ? 0.3 : 0.1;  // fast expand
-      const shrinkAlpha = 0.005;  // slow contract toward current range
-
-      // Expand quickly when value is outside range
+      const expandAlpha = state.samples < 30 ? 0.3 : 0.1;
+      const shrinkAlpha = 0.005;
       if (v < state.min) state.min += (v - state.min) * expandAlpha;
       if (v > state.max) state.max += (v - state.max) * expandAlpha;
-
-      // Contract slowly when value is inside range (prevents stuck extremes)
       if (v > state.min) state.min += (v - state.min) * shrinkAlpha;
       if (v < state.max) state.max += (v - state.max) * shrinkAlpha;
     }
@@ -73,135 +59,148 @@ function normalize(value: number, baseline: BaselineState): number {
   return (value - baseline.min) / (baseline.max - baseline.min);
 }
 
-// --- Stats for legend/debug overlay ---
+// --- Stats for legend overlay ---
 interface HeatmapStats {
   baselineMin: number;
   baselineMax: number;
   baselineReady: boolean;
   baselineSamples: number;
-  electrodeValues: Record<string, number>;  // current values per electrode
+  electrodeValues: Record<string, number>;
 }
 
-// --- Head mesh component ---
-interface HeadMeshProps {
+// --- Electrode position from electrodes.json ---
+interface ElectrodeData {
+  [name: string]: {
+    scalp: [number, number, number];
+    brain: [number, number, number];
+    vertex_idx: number;
+  };
+}
+
+// Channel names we care about
+const MUSE_CHANNELS = ["TP9", "AF7", "AF8", "TP10"];
+const ZUNA_CHANNELS = [
+  "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
+  "AF7", "AF8",
+  "T7", "T8", "TP9", "TP10",
+  "C3", "Cz", "C4",
+  "P7", "P3", "Pz", "P4", "P8",
+  "O1", "O2",
+];
+
+// --- IDW interpolation for brain mesh ---
+function computeBrainWeights(
+  vertices: Float32Array,
+  electrodePositions: [number, number, number][],
+  power = 2,
+  smoothing = 0.01,
+): Float32Array {
+  const numVerts = vertices.length / 3;
+  const numElec = electrodePositions.length;
+  const weights = new Float32Array(numVerts * numElec);
+
+  for (let v = 0; v < numVerts; v++) {
+    const vx = vertices[v * 3];
+    const vy = vertices[v * 3 + 1];
+    const vz = vertices[v * 3 + 2];
+
+    let weightSum = 0;
+    for (let e = 0; e < numElec; e++) {
+      const [ex, ey, ez] = electrodePositions[e];
+      const dx = vx - ex;
+      const dy = vy - ey;
+      const dz = vz - ez;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + smoothing;
+      const w = 1 / Math.pow(dist, power);
+      weights[v * numElec + e] = w;
+      weightSum += w;
+    }
+    for (let e = 0; e < numElec; e++) {
+      weights[v * numElec + e] /= weightSum;
+    }
+  }
+
+  return weights;
+}
+
+function interpolateToVertices(
+  weights: Float32Array,
+  electrodeValues: number[],
+  numVertices: number,
+  out?: Float32Array,
+): Float32Array {
+  const numElec = electrodeValues.length;
+  const result = out && out.length === numVertices ? out : new Float32Array(numVertices);
+  for (let v = 0; v < numVertices; v++) {
+    let val = 0;
+    for (let e = 0; e < numElec; e++) {
+      val += weights[v * numElec + e] * electrodeValues[e];
+    }
+    result[v] = val;
+  }
+  return result;
+}
+
+// --- Brain mesh component ---
+interface BrainMeshProps {
+  geometry: THREE.BufferGeometry;
+  electrodeData: ElectrodeData;
+  channelNames: string[];
   bandPowers: BandPowers | null;
   selectedBand: BandName;
   debug?: "static" | "wave" | "random";
   onStats?: (stats: HeatmapStats) => void;
-  onMeshReady?: (mesh: THREE.Mesh | null) => void;
 }
 
-function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: HeadMeshProps) {
+function BrainMesh({
+  geometry,
+  electrodeData,
+  channelNames,
+  bandPowers,
+  selectedBand,
+  debug,
+  onStats,
+}: BrainMeshProps) {
   const statsThrottleRef = useRef(0);
-  const meshRef = useRef<THREE.Mesh>(null);
-  const meshReadyRef = useRef(false);
 
-  // Build brain-like geometry once
-  const geometry = useMemo(() => {
-    const geo = new THREE.SphereGeometry(1, 64, 48);
+  // Get electrode brain positions for current channel set
+  const electrodePositions = useMemo(() => {
+    return channelNames
+      .filter((name) => electrodeData[name])
+      .map((name) => electrodeData[name].brain as [number, number, number]);
+  }, [channelNames, electrodeData]);
+
+  const activeChannels = useMemo(() => {
+    return channelNames.filter((name) => electrodeData[name]);
+  }, [channelNames, electrodeData]);
+
+  // Ensure geometry has vertex colors
+  const coloredGeometry = useMemo(() => {
+    const geo = geometry.clone();
     const pos = geo.attributes.position;
-    const normal = geo.attributes.normal;
-
-    for (let i = 0; i < pos.count; i++) {
-      let x = pos.getX(i);
-      let y = pos.getY(i);
-      let z = pos.getZ(i);
-
-      // 1. Brain shape: wider than tall, elongated front-to-back
-      x *= 0.85;   // narrower left-right
-      y *= 1.05;   // slightly taller
-      z *= 0.95;   // slightly shorter front-back
-
-      // 2. Flatten underside (brain base is flat, not spherical)
-      if (y < -0.3) {
-        y = -0.3 + (y + 0.3) * 0.3; // compress below -0.3
-      }
-
-      // 3. Interhemispheric fissure (midline groove)
-      const midlineDist = Math.abs(x);
-      if (midlineDist < 0.15 && y > 0.1) {
-        const fissureDepth = 0.08 * (1 - midlineDist / 0.15) * Math.max(0, (y - 0.1) / 0.9);
-        const nx = normal.getX(i);
-        const ny = normal.getY(i);
-        const nz = normal.getZ(i);
-        // Push inward along normal
-        x -= nx * fissureDepth;
-        y -= ny * fissureDepth;
-        z -= nz * fissureDepth;
-      }
-
-      // 4. Sulci via fBm noise displacement along normal
-      const noiseScale = 3.5;
-      const noiseAmp = 0.06;
-      const n = fbm3(x * noiseScale, y * noiseScale, z * noiseScale, 4, 2.2, 0.5);
-      const nx = normal.getX(i);
-      const ny = normal.getY(i);
-      const nz = normal.getZ(i);
-      // Only displace inward (sulci are grooves, not bumps)
-      const displacement = Math.min(0, n) * noiseAmp;
-      x += nx * displacement;
-      y += ny * displacement;
-      z += nz * displacement;
-
-      // 5. Frontal lobe bulge
-      if (z > 0.4 && y > -0.1) {
-        const bulge = 0.08 * Math.max(0, (z - 0.4) / 0.6) * Math.max(0, (y + 0.1) / 1.1);
-        z += bulge;
-      }
-
-      // 6. Temporal lobe bulge (sides, lower)
-      if (Math.abs(x) > 0.5 && y < 0.2 && z > -0.2) {
-        const side = (Math.abs(x) - 0.5) / 0.5;
-        const vert = Math.max(0, (0.2 - y) / 0.5);
-        const tbulge = 0.06 * side * vert;
-        x += Math.sign(x) * tbulge;
-      }
-
-      // 7. Occipital roundness (back)
-      if (z < -0.5 && y > -0.1) {
-        const backness = (-0.5 - z) / 0.5;
-        const obulge = 0.05 * Math.min(1, backness);
-        z -= obulge;
-      }
-
-      pos.setXYZ(i, x, y, z);
+    if (!geo.attributes.color) {
+      const colors = new Float32Array(pos.count * 3);
+      colors.fill(0.5);
+      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     }
-
-    pos.needsUpdate = true;
-    geo.computeVertexNormals();
-
-    // Add vertex colors
-    const colors = new Float32Array(pos.count * 3);
-    colors.fill(0.5);
-    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-
     return geo;
-  }, []);
+  }, [geometry]);
 
-  // Determine electrodes based on mode
-  const electrodes = useMemo(() => {
-    if (bandPowers && Object.keys(bandPowers.channels).length > 4) {
-      return ELECTRODES_23CH;
-    }
-    return ELECTRODES_4CH;
-  }, [bandPowers?.mode]);
-
-  // Compute interpolation weights (recompute when electrode set changes)
+  // Compute interpolation weights
   const weights = useMemo(() => {
-    const pos = geometry.attributes.position as THREE.BufferAttribute;
-    return computeInterpolationWeights(
+    const pos = coloredGeometry.attributes.position as THREE.BufferAttribute;
+    return computeBrainWeights(
       pos.array as Float32Array,
-      electrodes,
+      electrodePositions,
     );
-  }, [geometry, electrodes]);
+  }, [coloredGeometry, electrodePositions]);
 
-  // Pre-allocated buffers (reused every frame to avoid GC)
+  // Pre-allocated buffers
   const interpBufRef = useRef<Float32Array | null>(null);
-  // Electrode-level lerp state (smooth between 2s updates)
   const prevElecRef = useRef<number[] | null>(null);
   const targetElecRef = useRef<number[] | null>(null);
   const lerpStartRef = useRef(0);
-  const lerpDurationRef = useRef(0.5); // seconds between updates (matches backend metrics_interval)
+  const lerpDurationRef = useRef(0.5);
   const baselineRef = useRef<BaselineState>({
     min: 0, max: 1, samples: 0, ready: false,
   });
@@ -210,50 +209,39 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: Hea
   const prevBandPowersRef = useRef<BandPowers | null>(null);
   if (bandPowers !== prevBandPowersRef.current && bandPowers && !debug) {
     const bandValues = extractBandValues(bandPowers, selectedBand);
-    const newTarget = electrodes.map((e: ElectrodePosition) => bandValues[e.name] ?? 0);
-    // Current interpolated position becomes the new start
+    const newTarget = activeChannels.map((name) => bandValues[name] ?? 0);
     prevElecRef.current = targetElecRef.current
       ? [...targetElecRef.current]
       : newTarget;
     targetElecRef.current = newTarget;
     lerpStartRef.current = performance.now() / 1000;
     prevBandPowersRef.current = bandPowers;
-    // Update baseline with new target values
     updateBaseline(baselineRef.current, newTarget);
   }
 
   // Update vertex colors each frame
   useFrame(({ clock }) => {
-    // Notify parent of mesh ref (once)
-    if (!meshReadyRef.current && meshRef.current && onMeshReady) {
-      meshReadyRef.current = true;
-      onMeshReady(meshRef.current);
-    }
-
-    const colorAttr = geometry.attributes.color as THREE.BufferAttribute;
+    const colorAttr = coloredGeometry.attributes.color as THREE.BufferAttribute;
     const numVerts = colorAttr.count;
 
-    // Get electrode values — debug modes or lerped live values
     let electrodeValues: number[];
 
     if (debug === "static") {
-      electrodeValues = electrodes.map((_: ElectrodePosition, i: number) => (i + 1) / electrodes.length);
+      electrodeValues = activeChannels.map((_, i) => (i + 1) / activeChannels.length);
     } else if (debug === "wave") {
       const t = clock.getElapsedTime();
-      electrodeValues = electrodes.map((e: ElectrodePosition) => {
-        return 0.5 + 0.5 * Math.sin(t * Math.PI - e.theta * 2);
-      });
+      electrodeValues = activeChannels.map((_, i) =>
+        0.5 + 0.5 * Math.sin(t * Math.PI - i * 0.5)
+      );
     } else if (debug === "random") {
       const sec = Math.floor(clock.getElapsedTime());
-      electrodeValues = electrodes.map((_: ElectrodePosition, i: number) =>
+      electrodeValues = activeChannels.map((_, i) =>
         Math.abs(Math.sin(sec * 13.7 + i * 7.3))
       );
     } else if (targetElecRef.current) {
-      // Lerp from previous to target over lerpDuration
       const now = performance.now() / 1000;
       const elapsed = now - lerpStartRef.current;
       const t = Math.min(elapsed / lerpDurationRef.current, 1.0);
-      // Smooth step for natural feel
       const smooth = t * t * (3 - 2 * t);
       const prev = prevElecRef.current!;
       const target = targetElecRef.current;
@@ -261,21 +249,18 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: Hea
         prev[i] + (v - prev[i]) * smooth
       );
     } else {
-      return; // No data yet
+      return;
     }
 
-    // Interpolate to vertices (reuse buffer)
     if (!interpBufRef.current || interpBufRef.current.length !== numVerts) {
       interpBufRef.current = new Float32Array(numVerts);
     }
     const vertexValues = interpolateToVertices(weights, electrodeValues, numVerts, interpBufRef.current);
 
-    // Apply color map
     const colors = colorAttr.array as Float32Array;
-
     for (let i = 0; i < numVerts; i++) {
       const normalized = debug
-        ? vertexValues[i]  // debug modes are already 0-1
+        ? vertexValues[i]
         : normalize(vertexValues[i], baselineRef.current);
       valueToColor(normalized, _scratchColor);
       colors[i * 3] = _scratchColor.r;
@@ -285,14 +270,14 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: Hea
 
     colorAttr.needsUpdate = true;
 
-    // Report stats for legend (throttled to ~2Hz)
+    // Report stats (throttled to ~2Hz)
     if (onStats) {
       const now = clock.getElapsedTime();
       if (now - statsThrottleRef.current > 0.5) {
         statsThrottleRef.current = now;
         const ev: Record<string, number> = {};
-        for (let e = 0; e < electrodes.length; e++) {
-          ev[electrodes[e].name] = electrodeValues[e];
+        for (let e = 0; e < activeChannels.length; e++) {
+          ev[activeChannels[e]] = electrodeValues[e];
         }
         onStats({
           baselineMin: baselineRef.current.min,
@@ -306,10 +291,10 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: Hea
   });
 
   return (
-    <mesh ref={meshRef} geometry={geometry}>
+    <mesh geometry={coloredGeometry}>
       <meshStandardMaterial
         vertexColors
-        roughness={0.7}
+        roughness={0.65}
         metalness={0.05}
         side={THREE.DoubleSide}
       />
@@ -317,40 +302,28 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats, onMeshReady }: Hea
   );
 }
 
-// --- Electrode dots (raycast onto brain surface) ---
+// --- Electrode dots ---
 function ElectrodeDots({
-  electrodes,
-  brainMesh,
+  electrodeData,
+  channelNames,
 }: {
-  electrodes: ElectrodePosition[];
-  brainMesh: THREE.Mesh | null;
+  electrodeData: ElectrodeData;
+  channelNames: string[];
 }) {
   const positions = useMemo(() => {
-    return electrodes.map((e) => {
-      const [x, y, z] = sphericalToCartesian(e.theta, e.phi);
-      // Start from a point outside the brain, shoot inward
-      const dir = new THREE.Vector3(x, y, z).normalize();
-      const origin = dir.clone().multiplyScalar(2.0); // outside
-
-      if (brainMesh) {
-        const raycaster = new THREE.Raycaster(origin, dir.clone().negate());
-        const hits = raycaster.intersectObject(brainMesh);
-        if (hits.length > 0) {
-          // Offset slightly above surface
-          return hits[0].point.clone().add(dir.clone().multiplyScalar(0.02));
-        }
-      }
-
-      // Fallback: approximate position with brain shape transforms
-      return new THREE.Vector3(x * 0.87, y * 1.07, z * 0.97);
-    });
-  }, [electrodes, brainMesh]);
+    return channelNames
+      .filter((name) => electrodeData[name])
+      .map((name) => {
+        const pos = electrodeData[name].brain;
+        return { name, position: new THREE.Vector3(pos[0], pos[1], pos[2]) };
+      });
+  }, [channelNames, electrodeData]);
 
   return (
     <>
-      {positions.map((pos, i) => (
-        <mesh key={electrodes[i].name} position={pos}>
-          <sphereGeometry args={[0.025, 8, 8]} />
+      {positions.map(({ name, position }) => (
+        <mesh key={name} position={position}>
+          <sphereGeometry args={[0.015, 8, 8]} />
           <meshStandardMaterial
             color="#00ff88"
             emissive="#00ff88"
@@ -364,21 +337,21 @@ function ElectrodeDots({
 
 // --- Color legend ---
 const BAND_LABELS: Record<string, string> = {
-  focus: "Focus (θ/β ratio)",
-  theta: "Theta (4–8 Hz)",
-  alpha: "Alpha (8–13 Hz)",
-  beta: "Beta (13–30 Hz)",
-  gamma: "Gamma (30–50 Hz)",
-  delta: "Delta (1–4 Hz)",
+  focus: "Focus (\u03b8/\u03b2 ratio)",
+  theta: "Theta (4\u20138 Hz)",
+  alpha: "Alpha (8\u201313 Hz)",
+  beta: "Beta (13\u201330 Hz)",
+  gamma: "Gamma (30\u201350 Hz)",
+  delta: "Delta (1\u20134 Hz)",
 };
 
 const BAND_UNITS: Record<string, string> = {
   focus: "ratio",
-  theta: "µV²",
-  alpha: "µV²",
-  beta: "µV²",
-  gamma: "µV²",
-  delta: "µV²",
+  theta: "\u00b5V\u00b2",
+  alpha: "\u00b5V\u00b2",
+  beta: "\u00b5V\u00b2",
+  gamma: "\u00b5V\u00b2",
+  delta: "\u00b5V\u00b2",
 };
 
 function Legend({
@@ -390,16 +363,11 @@ function Legend({
 }) {
   const label = BAND_LABELS[selectedBand] || selectedBand;
   const unit = BAND_UNITS[selectedBand] || "";
-
-  // Color bar gradient matching the 5-stop scale
   const gradient =
     "linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)";
-
-  const minVal = stats ? stats.baselineMin.toFixed(1) : "—";
-  const maxVal = stats ? stats.baselineMax.toFixed(1) : "—";
+  const minVal = stats ? stats.baselineMin.toFixed(1) : "\u2014";
+  const maxVal = stats ? stats.baselineMax.toFixed(1) : "\u2014";
   const warmup = stats && !stats.baselineReady;
-
-  // Per-electrode values for debugging
   const elecEntries = stats
     ? Object.entries(stats.electrodeValues).sort(([a], [b]) => a.localeCompare(b))
     : [];
@@ -410,7 +378,7 @@ function Legend({
         {label}
         {warmup && (
           <span style={{ color: "#ff8800", marginLeft: "8px" }}>
-            ● warming up ({stats?.baselineSamples ?? 0}/5)
+            \u25cf warming up ({stats?.baselineSamples ?? 0}/5)
           </span>
         )}
       </div>
@@ -454,8 +422,8 @@ function Legend({
 function Disclaimer({ mode }: { mode: string }) {
   const text =
     mode === "23ch"
-      ? "AI-reconstructed from 4 sensors — more spatial detail but not equivalent to physical electrodes"
-      : "Estimated from 4 sensors — visualization only, not clinical EEG";
+      ? "AI-reconstructed from 4 sensors \u2014 more spatial detail but not equivalent to physical electrodes"
+      : "Estimated from 4 sensors \u2014 visualization only, not clinical EEG";
   return (
     <div
       style={{
@@ -470,35 +438,67 @@ function Disclaimer({ mode }: { mode: string }) {
   );
 }
 
-// --- Scene content (needs access to mesh ref) ---
+// --- Scene content ---
 function BrainScene({
   bandPowers,
   selectedBand,
   debug,
-  electrodes,
   onStats,
 }: {
   bandPowers: BandPowers | null;
   selectedBand: BandName;
   debug?: "static" | "wave" | "random";
-  electrodes: ElectrodePosition[];
   onStats: (s: HeatmapStats) => void;
 }) {
-  const [brainMesh, setBrainMesh] = useState<THREE.Mesh | null>(null);
+  const gltf = useLoader(GLTFLoader, "/brain.glb");
+  const [electrodeData, setElectrodeData] = useState<ElectrodeData | null>(null);
+
+  // Load electrode positions
+  useEffect(() => {
+    fetch("/electrodes.json")
+      .then((r) => r.json())
+      .then((data) => setElectrodeData(data))
+      .catch((err) => console.error("Failed to load electrodes.json:", err));
+  }, []);
+
+  // Extract geometry from GLTF
+  const brainGeometry = useMemo(() => {
+    let geo: THREE.BufferGeometry | null = null;
+    gltf.scene.traverse((child) => {
+      if (child instanceof THREE.Mesh && !geo) {
+        geo = child.geometry;
+      }
+    });
+    return geo;
+  }, [gltf]);
+
+  // Determine channel set
+  const channelNames = useMemo(() => {
+    if (bandPowers && Object.keys(bandPowers.channels).length > 4) {
+      return ZUNA_CHANNELS;
+    }
+    return MUSE_CHANNELS;
+  }, [bandPowers?.mode]);
+
+  if (!brainGeometry || !electrodeData) {
+    return null; // Loading
+  }
 
   return (
     <>
       <ambientLight intensity={0.5} />
       <directionalLight position={[2, 4, 3]} intensity={0.7} />
       <directionalLight position={[-2, 2, -1]} intensity={0.3} color="#aaccff" />
-      <HeadMesh
+      <BrainMesh
+        geometry={brainGeometry}
+        electrodeData={electrodeData}
+        channelNames={channelNames}
         bandPowers={bandPowers}
         selectedBand={selectedBand}
         debug={debug}
         onStats={onStats}
-        onMeshReady={setBrainMesh}
       />
-      <ElectrodeDots electrodes={electrodes} brainMesh={brainMesh} />
+      <ElectrodeDots electrodeData={electrodeData} channelNames={channelNames} />
       <OrbitControls
         enablePan={false}
         enableZoom={false}
@@ -523,13 +523,6 @@ export function BrainHeatmap({
   debug,
   height = 300,
 }: BrainHeatmapProps) {
-  const electrodes = useMemo(() => {
-    if (bandPowers && Object.keys(bandPowers.channels).length > 4) {
-      return ELECTRODES_23CH;
-    }
-    return ELECTRODES_4CH;
-  }, [bandPowers?.mode]);
-
   const mode = bandPowers?.mode ?? "4ch";
   const [stats, setStats] = useState<HeatmapStats | null>(null);
   const handleStats = useCallback((s: HeatmapStats) => setStats(s), []);
@@ -544,7 +537,6 @@ export function BrainHeatmap({
           bandPowers={bandPowers}
           selectedBand={selectedBand}
           debug={debug}
-          electrodes={electrodes}
           onStats={handleStats}
         />
       </Canvas>
