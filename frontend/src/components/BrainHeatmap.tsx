@@ -85,12 +85,11 @@ interface HeatmapStats {
 interface HeadMeshProps {
   bandPowers: BandPowers | null;
   selectedBand: BandName;
-  emaAlpha: number;
   debug?: "static" | "wave" | "random";
   onStats?: (stats: HeatmapStats) => void;
 }
 
-function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug, onStats }: HeadMeshProps) {
+function HeadMesh({ bandPowers, selectedBand, debug, onStats }: HeadMeshProps) {
   const statsThrottleRef = useRef(0);
   const meshRef = useRef<THREE.Mesh>(null);
 
@@ -140,18 +139,37 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug, onStats }: HeadMe
 
   // Pre-allocated buffers (reused every frame to avoid GC)
   const interpBufRef = useRef<Float32Array | null>(null);
-  // State for EMA smoothing and baseline
-  const smoothedRef = useRef<Float32Array | null>(null);
+  // Electrode-level lerp state (smooth between 2s updates)
+  const prevElecRef = useRef<number[] | null>(null);
+  const targetElecRef = useRef<number[] | null>(null);
+  const lerpStartRef = useRef(0);
+  const lerpDurationRef = useRef(2.0); // seconds between updates
   const baselineRef = useRef<BaselineState>({
     min: 0, max: 1, samples: 0, ready: false,
   });
+
+  // Detect when bandPowers changes and set up lerp
+  const prevBandPowersRef = useRef<BandPowers | null>(null);
+  if (bandPowers !== prevBandPowersRef.current && bandPowers && !debug) {
+    const bandValues = extractBandValues(bandPowers, selectedBand);
+    const newTarget = electrodes.map((e: ElectrodePosition) => bandValues[e.name] ?? 0);
+    // Current interpolated position becomes the new start
+    prevElecRef.current = targetElecRef.current
+      ? [...targetElecRef.current]
+      : newTarget;
+    targetElecRef.current = newTarget;
+    lerpStartRef.current = performance.now() / 1000;
+    prevBandPowersRef.current = bandPowers;
+    // Update baseline with new target values
+    updateBaseline(baselineRef.current, newTarget);
+  }
 
   // Update vertex colors each frame
   useFrame(({ clock }) => {
     const colorAttr = geometry.attributes.color as THREE.BufferAttribute;
     const numVerts = colorAttr.count;
 
-    // Get electrode values
+    // Get electrode values — debug modes or lerped live values
     let electrodeValues: number[];
 
     if (debug === "static") {
@@ -162,47 +180,39 @@ function HeadMesh({ bandPowers, selectedBand, emaAlpha, debug, onStats }: HeadMe
         return 0.5 + 0.5 * Math.sin(t * Math.PI - e.theta * 2);
       });
     } else if (debug === "random") {
-      // Only update once per second
       const sec = Math.floor(clock.getElapsedTime());
       electrodeValues = electrodes.map((_: ElectrodePosition, i: number) =>
         Math.abs(Math.sin(sec * 13.7 + i * 7.3))
       );
-    } else if (bandPowers) {
-      const bandValues = extractBandValues(bandPowers, selectedBand);
-      electrodeValues = electrodes.map((e: ElectrodePosition) => bandValues[e.name] ?? 0);
+    } else if (targetElecRef.current) {
+      // Lerp from previous to target over lerpDuration
+      const now = performance.now() / 1000;
+      const elapsed = now - lerpStartRef.current;
+      const t = Math.min(elapsed / lerpDurationRef.current, 1.0);
+      // Smooth step for natural feel
+      const smooth = t * t * (3 - 2 * t);
+      const prev = prevElecRef.current!;
+      const target = targetElecRef.current;
+      electrodeValues = target.map((v, i) =>
+        prev[i] + (v - prev[i]) * smooth
+      );
     } else {
-      return; // No data
-    }
-
-    // Update baseline normalization
-    if (!debug) {
-      updateBaseline(baselineRef.current, electrodeValues);
+      return; // No data yet
     }
 
     // Interpolate to vertices (reuse buffer)
     if (!interpBufRef.current || interpBufRef.current.length !== numVerts) {
       interpBufRef.current = new Float32Array(numVerts);
     }
-    const raw = interpolateToVertices(weights, electrodeValues, numVerts, interpBufRef.current);
-
-    // EMA smoothing
-    if (!smoothedRef.current || smoothedRef.current.length !== numVerts) {
-      smoothedRef.current = raw;
-    } else {
-      const s = smoothedRef.current;
-      for (let i = 0; i < numVerts; i++) {
-        s[i] = emaAlpha * raw[i] + (1 - emaAlpha) * s[i];
-      }
-    }
+    const vertexValues = interpolateToVertices(weights, electrodeValues, numVerts, interpBufRef.current);
 
     // Apply color map
     const colors = colorAttr.array as Float32Array;
-    const s = smoothedRef.current!;
 
     for (let i = 0; i < numVerts; i++) {
       const normalized = debug
-        ? s[i]  // debug modes are already 0-1
-        : normalize(s[i], baselineRef.current);
+        ? vertexValues[i]  // debug modes are already 0-1
+        : normalize(vertexValues[i], baselineRef.current);
       valueToColor(normalized, _scratchColor);
       colors[i * 3] = _scratchColor.r;
       colors[i * 3 + 1] = _scratchColor.g;
@@ -401,7 +411,6 @@ function Disclaimer({ mode }: { mode: string }) {
 export interface BrainHeatmapProps {
   bandPowers: BandPowers | null;
   selectedBand?: BandName;
-  emaAlpha?: number;
   debug?: "static" | "wave" | "random";
   height?: number;
 }
@@ -409,7 +418,6 @@ export interface BrainHeatmapProps {
 export function BrainHeatmap({
   bandPowers,
   selectedBand = "focus",
-  emaAlpha = 0.15,
   debug,
   height = 300,
 }: BrainHeatmapProps) {
@@ -435,7 +443,6 @@ export function BrainHeatmap({
         <HeadMesh
           bandPowers={bandPowers}
           selectedBand={selectedBand}
-          emaAlpha={emaAlpha}
           debug={debug}
           onStats={handleStats}
         />
