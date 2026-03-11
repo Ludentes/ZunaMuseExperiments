@@ -176,7 +176,7 @@ def main():
           f"{'EC>thr':>6s}  {'EO>thr':>6s}")
     print(f"  {'-' * 5}  {'-' * 8}  {'-' * 8}  {'-' * 8}  {'-' * 6}  {'-' * 6}")
 
-    best_mult = None
+    best_mult = multipliers[0]
     best_score = -1.0
     for mult in multipliers:
         threshold = baseline * mult
