@@ -174,15 +174,14 @@ function BrainMesh({
     return channelNames.filter((name) => electrodeData[name]);
   }, [channelNames, electrodeData]);
 
-  // Ensure geometry has vertex colors
+  // Clone geometry and always create fresh RGB vertex color attribute
   const coloredGeometry = useMemo(() => {
     const geo = geometry.clone();
     const pos = geo.attributes.position;
-    if (!geo.attributes.color) {
-      const colors = new Float32Array(pos.count * 3);
-      colors.fill(0.5);
-      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-    }
+    // Always overwrite — GLB may use different attribute name or RGBA format
+    const colors = new Float32Array(pos.count * 3);
+    colors.fill(0.5);
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     return geo;
   }, [geometry]);
 
@@ -486,9 +485,10 @@ function BrainScene({
 
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <directionalLight position={[2, 4, 3]} intensity={0.7} />
-      <directionalLight position={[-2, 2, -1]} intensity={0.3} color="#aaccff" />
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[2, 3, 4]} intensity={0.5} />
+      <directionalLight position={[-2, 3, -4]} intensity={0.5} />
+      <directionalLight position={[0, -2, 0]} intensity={0.2} />
       <BrainMesh
         geometry={brainGeometry}
         electrodeData={electrodeData}
