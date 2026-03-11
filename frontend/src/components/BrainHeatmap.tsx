@@ -285,7 +285,7 @@ export interface BrainHeatmapProps {
 export function BrainHeatmap({
   bandPowers,
   selectedBand = "focus",
-  emaAlpha = 0.3,
+  emaAlpha = 0.15,
   debug,
   height = 300,
 }: BrainHeatmapProps) {
