@@ -10,6 +10,10 @@ from backend.pipeline.base import Stage
 from backend.pipeline.stages.preprocessing import PreprocessingResult
 from backend.pipeline.types import BANDS, BAND_NAMES, CH_NAMES, Cadence, PipelineFrame
 
+# Channel names for FAA: AF7 (left frontal), AF8 (right frontal)
+_FAA_LEFT = "AF7"
+_FAA_RIGHT = "AF8"
+
 
 RAIL_THRESHOLD = 995.0  # µV
 
@@ -41,6 +45,112 @@ class HeadMotionResult:
     motion_artifact: bool
 
 
+@dataclass
+class EyesClosedResult:
+    eyes_closed: bool
+    alpha_ratio: float      # current frontal alpha / baseline
+    baseline_alpha: float   # current baseline value
+
+
+class EyesClosedDetector(Stage):
+    """Detect eyes-closed state via sustained frontal alpha power increase.
+
+    Uses frontal channels (AF7 + AF8) alpha power from BandPowerResult.
+    Maintains a slow-adapting baseline and detects when alpha exceeds
+    the baseline by a configurable multiplier for a sustained duration.
+
+    Hysteresis: once eyes_closed is True, alpha must drop below a lower
+    threshold (open_threshold) to transition back to eyes_open.
+
+    Must run AFTER BandPowerExtractor in the SLOW pipeline.
+    """
+
+    name = "eyes_closed_detector"
+    cadence = Cadence.SLOW
+
+    def __init__(
+        self,
+        close_threshold: float = 2.0,
+        open_threshold: float = 1.3,
+        sustain_seconds: float = 1.5,
+        baseline_ema_alpha: float = 0.002,
+        cold_start_ticks: int = 6,
+    ):
+        self.close_threshold = close_threshold
+        self.open_threshold = open_threshold
+        self.sustain_seconds = sustain_seconds
+        self._baseline_ema_alpha = baseline_ema_alpha
+        self._cold_start_ticks = cold_start_ticks
+
+        self._baseline: float = 0.0
+        self._tick_count: int = 0
+        self._eyes_closed: bool = False
+        self._high_since: float = 0.0
+
+    def process(self, frame: PipelineFrame) -> None:
+        bp = frame.get(BandPowerResult)
+        if bp is None or "alpha" not in bp.band_powers:
+            return
+
+        alpha_list = bp.band_powers["alpha"]
+
+        # Find AF7/AF8 indices by channel name
+        ch_names = list(CH_NAMES)
+        if len(alpha_list) > len(CH_NAMES):
+            from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
+            ch_names = ZUNA_CH_NAMES
+        af7_idx = ch_names.index("AF7") if "AF7" in ch_names else 1
+        af8_idx = ch_names.index("AF8") if "AF8" in ch_names else 2
+
+        if af7_idx >= len(alpha_list) or af8_idx >= len(alpha_list):
+            return
+
+        frontal_alpha = (alpha_list[af7_idx] + alpha_list[af8_idx]) / 2.0
+        self._tick_count += 1
+
+        # Baseline update
+        if self._tick_count <= self._cold_start_ticks:
+            self._baseline = (
+                self._baseline * (self._tick_count - 1) + frontal_alpha
+            ) / self._tick_count
+        elif not self._eyes_closed:
+            self._baseline = (
+                self._baseline_ema_alpha * frontal_alpha
+                + (1 - self._baseline_ema_alpha) * self._baseline
+            )
+
+        # Don't detect during cold start
+        if self._tick_count < self._cold_start_ticks:
+            frame.set(EyesClosedResult(
+                eyes_closed=False,
+                alpha_ratio=0.0,
+                baseline_alpha=self._baseline,
+            ))
+            return
+
+        ratio = frontal_alpha / self._baseline if self._baseline > 0 else 0.0
+        now = frame.timestamp
+
+        if not self._eyes_closed:
+            if ratio >= self.close_threshold:
+                if self._high_since == 0.0:
+                    self._high_since = now
+                elif now - self._high_since >= self.sustain_seconds:
+                    self._eyes_closed = True
+            else:
+                self._high_since = 0.0
+        else:
+            if ratio < self.open_threshold:
+                self._eyes_closed = False
+                self._high_since = 0.0
+
+        frame.set(EyesClosedResult(
+            eyes_closed=self._eyes_closed,
+            alpha_ratio=round(ratio, 2),
+            baseline_alpha=round(self._baseline, 2),
+        ))
+
+
 class BandPowerExtractor(Stage):
     name = "band_power_extractor"
     cadence = Cadence.SLOW
@@ -48,9 +158,23 @@ class BandPowerExtractor(Stage):
     def __init__(self, bands: dict[str, tuple[float, float]] | None = None):
         self.bands = bands or BANDS
 
+    def _get_channel_names(self, n_channels: int) -> list[str]:
+        """Return channel names matching the current EEG layout."""
+        if n_channels <= len(CH_NAMES):
+            return list(CH_NAMES[:n_channels])
+        # 23ch ZUNA mode
+        from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
+        return ZUNA_CH_NAMES[:n_channels]
+
     def process(self, frame: PipelineFrame) -> None:
-        prep = frame.get(PreprocessingResult)
-        eeg = prep.eeg_filtered if prep else frame.eeg
+        # Use ZUNA 23ch output if available, else fall back to preprocessed/raw 4ch
+        from backend.pipeline.stages.zuna import ZunaResult
+        zuna = frame.get(ZunaResult)
+        if zuna is not None:
+            eeg = zuna.eeg_23ch
+        else:
+            prep = frame.get(PreprocessingResult)
+            eeg = prep.eeg_filtered if prep else frame.eeg
         if eeg is None:
             return
 
@@ -59,9 +183,11 @@ class BandPowerExtractor(Stage):
         if eeg.shape[1] < nfft:
             return
 
+        n_channels = eeg.shape[0]
+        ch_names = self._get_channel_names(n_channels)
         band_powers: dict[str, list[float]] = {b: [] for b in BAND_NAMES}
 
-        for ch_idx in range(eeg.shape[0]):
+        for ch_idx in range(n_channels):
             channel_data = eeg[ch_idx].astype(np.float64).copy()
             try:
                 # Winsorize: clip to ±4 SD to prevent spikes from dominating PSD
@@ -89,14 +215,15 @@ class BandPowerExtractor(Stage):
             beta = band_powers["beta"][i]
             theta_beta.append(round(theta / beta, 2) if beta > 0 else 0.0)
 
-        # Frontal alpha asymmetry
-        alpha = band_powers.get("alpha", [0, 0, 0, 0])
-        if len(alpha) >= 4:
-            af7_alpha = max(alpha[1], 1e-10)
-            af8_alpha = max(alpha[2], 1e-10)
+        # Frontal alpha asymmetry — find AF7/AF8 by name, not hardcoded index
+        faa = 0.0
+        alpha = band_powers.get("alpha", [])
+        af7_idx = ch_names.index(_FAA_LEFT) if _FAA_LEFT in ch_names else -1
+        af8_idx = ch_names.index(_FAA_RIGHT) if _FAA_RIGHT in ch_names else -1
+        if af7_idx >= 0 and af8_idx >= 0 and af7_idx < len(alpha) and af8_idx < len(alpha):
+            af7_alpha = max(alpha[af7_idx], 1e-10)
+            af8_alpha = max(alpha[af8_idx], 1e-10)
             faa = round(math.log(af8_alpha) - math.log(af7_alpha), 3)
-        else:
-            faa = 0.0
 
         frame.set(BandPowerResult(
             band_powers=band_powers,
@@ -109,12 +236,20 @@ class SignalQualityChecker(Stage):
     name = "signal_quality_checker"
     cadence = Cadence.SLOW
 
+    def _get_channel_names(self, n_channels: int) -> list[str]:
+        """Return channel names matching the current EEG layout."""
+        if n_channels <= len(CH_NAMES):
+            return list(CH_NAMES[:n_channels])
+        from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
+        return ZUNA_CH_NAMES[:n_channels]
+
     def process(self, frame: PipelineFrame) -> None:
         if frame.eeg is None or frame.eeg.shape[1] == 0:
             return
 
+        ch_names = self._get_channel_names(frame.eeg.shape[0])
         quality = {}
-        for i, name in enumerate(CH_NAMES[:frame.eeg.shape[0]]):
+        for i, name in enumerate(ch_names):
             channel = frame.eeg[i]
             n = len(channel)
             railed = float(np.sum(np.abs(channel) > RAIL_THRESHOLD)) / n
