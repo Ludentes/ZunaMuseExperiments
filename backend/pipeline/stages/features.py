@@ -151,6 +151,95 @@ class EyesClosedDetector(Stage):
         ))
 
 
+@dataclass
+class HeadbandStateResult:
+    state: str              # "ready", "fitting", "headband_off"
+    seconds_in_state: float
+
+
+class HeadbandStateTracker(Stage):
+    """Track headband connection state via signal quality.
+
+    State machine:
+      fitting --(good fit for ready_seconds)--> ready
+      ready   --(poor fit for off_seconds)----> headband_off
+      headband_off --(any non-poor signal)----> fitting
+      ready/fitting --(poor fit < off_seconds)-> stay (reset good timer)
+
+    Must run AFTER SignalQualityChecker in the SLOW pipeline.
+    """
+
+    name = "headband_state_tracker"
+    cadence = Cadence.SLOW
+
+    def __init__(
+        self,
+        ready_seconds: float = 3.0,
+        off_seconds: float = 1.5,
+    ):
+        self.ready_seconds = ready_seconds
+        self.off_seconds = off_seconds
+        self._state: str = "fitting"
+        self._state_entered: float = 0.0
+        self._good_since: float = 0.0
+        self._poor_since: float = 0.0
+
+    def process(self, frame: PipelineFrame) -> None:
+        sq = frame.get(SignalQualityResult)
+        if sq is None:
+            return
+
+        now = frame.timestamp
+        if self._state_entered == 0.0:
+            self._state_entered = now
+
+        fit = sq.fit_status
+
+        if self._state == "fitting":
+            if fit == "good":
+                if self._good_since == 0.0:
+                    self._good_since = now
+                elif now - self._good_since >= self.ready_seconds:
+                    self._state = "ready"
+                    self._state_entered = now
+                    self._good_since = 0.0
+                    self._poor_since = 0.0
+            else:
+                self._good_since = 0.0
+                if fit == "poor":
+                    if self._poor_since == 0.0:
+                        self._poor_since = now
+                    elif now - self._poor_since >= self.off_seconds:
+                        self._state = "headband_off"
+                        self._state_entered = now
+                        self._poor_since = 0.0
+                else:
+                    self._poor_since = 0.0
+
+        elif self._state == "ready":
+            if fit == "poor":
+                if self._poor_since == 0.0:
+                    self._poor_since = now
+                elif now - self._poor_since >= self.off_seconds:
+                    self._state = "headband_off"
+                    self._state_entered = now
+                    self._poor_since = 0.0
+            else:
+                self._poor_since = 0.0
+
+        elif self._state == "headband_off":
+            if fit != "poor":
+                self._state = "fitting"
+                self._state_entered = now
+                self._good_since = now if fit == "good" else 0.0
+                self._poor_since = 0.0
+
+        frame.set(HeadbandStateResult(
+            state=self._state,
+            seconds_in_state=round(now - self._state_entered, 1),
+        ))
+
+
 class BandPowerExtractor(Stage):
     name = "band_power_extractor"
     cadence = Cadence.SLOW
