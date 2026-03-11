@@ -64,6 +64,11 @@ class BandPowerExtractor(Stage):
         for ch_idx in range(eeg.shape[0]):
             channel_data = eeg[ch_idx].astype(np.float64).copy()
             try:
+                # Winsorize: clip to ±4 SD to prevent spikes from dominating PSD
+                mu = np.mean(channel_data)
+                sd = np.std(channel_data)
+                if sd > 0:
+                    np.clip(channel_data, mu - 4 * sd, mu + 4 * sd, out=channel_data)
                 DataFilter.detrend(channel_data, DetrendOperations.LINEAR.value)
                 psd = DataFilter.get_psd_welch(
                     channel_data, nfft, nfft // 2,
