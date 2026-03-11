@@ -12,6 +12,7 @@ from backend.pipeline.stages.features import (
     BandPowerExtractor,
     ConcentrationScorer,
     EyesClosedDetector,
+    HeadbandStateTracker,
     HeadMotionExtractor,
     HeartRateExtractor,
     SignalQualityChecker,
@@ -38,6 +39,7 @@ def create_default_pipeline(
     stages.extend([
         BandPowerExtractor(),
         SignalQualityChecker(),
+        HeadbandStateTracker(),
         HeartRateExtractor(),
         HeadMotionExtractor(),
         ConcentrationScorer(),

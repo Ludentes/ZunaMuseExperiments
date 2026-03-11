@@ -75,3 +75,15 @@ def test_serialize_eyes_closed_result():
     assert "eyes_closed" in metrics
     assert metrics["eyes_closed"]["active"] is True
     assert metrics["eyes_closed"]["alpha_ratio"] == 2.1
+
+
+from backend.pipeline.stages.features import HeadbandStateResult
+
+
+def test_serialize_headband_state_result():
+    frame = PipelineFrame(eeg=None, ppg=None, imu=None, timestamp=0.0)
+    frame.set(HeadbandStateResult(state="ready", seconds_in_state=5.0))
+    metrics = frame_to_metrics(frame)
+    assert "headband" in metrics
+    assert metrics["headband"]["state"] == "ready"
+    assert metrics["headband"]["seconds_in_state"] == 5.0

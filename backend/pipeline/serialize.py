@@ -12,6 +12,7 @@ from backend.pipeline.stages.features import (
     BandPowerResult,
     ConcentrationResult,
     EyesClosedResult,
+    HeadbandStateResult,
     HeadMotionResult,
     HeartRateResult,
     SignalQualityResult,
@@ -66,6 +67,13 @@ def frame_to_metrics(frame: PipelineFrame) -> dict:
             "active": ec.eyes_closed,
             "alpha_ratio": ec.alpha_ratio,
             "baseline_alpha": ec.baseline_alpha,
+        }
+
+    hs = frame.get(HeadbandStateResult)
+    if hs:
+        metrics["headband"] = {
+            "state": hs.state,
+            "seconds_in_state": hs.seconds_in_state,
         }
 
     bpm = frame.get(BandPowerMessage)

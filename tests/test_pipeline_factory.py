@@ -20,3 +20,12 @@ def test_factory_includes_eyes_closed_detector():
     bp_idx = names.index("band_power_extractor")
     ec_idx = names.index("eyes_closed_detector")
     assert ec_idx > bp_idx
+
+
+def test_factory_includes_headband_state_tracker():
+    pipeline = create_default_pipeline()
+    names = [s.name for s in pipeline.stages]
+    assert "headband_state_tracker" in names
+    sq_idx = names.index("signal_quality_checker")
+    hs_idx = names.index("headband_state_tracker")
+    assert hs_idx > sq_idx
