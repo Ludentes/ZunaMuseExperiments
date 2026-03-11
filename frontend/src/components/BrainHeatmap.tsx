@@ -322,7 +322,7 @@ function ElectrodeDots({
     <>
       {positions.map(({ name, position }) => (
         <mesh key={name} position={position}>
-          <sphereGeometry args={[0.015, 8, 8]} />
+          <sphereGeometry args={[0.03, 8, 8]} />
           <meshStandardMaterial
             color="#00ff88"
             emissive="#00ff88"
