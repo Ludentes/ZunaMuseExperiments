@@ -49,7 +49,10 @@ class EEGServer:
         self._eeg_rolling_max = 512  # 2s at 256Hz
         self._ppg_buffer: list[np.ndarray] = []
         self._imu_buffer: list[np.ndarray] = []
-        self._pipeline = create_default_pipeline()
+        self._pipeline = create_default_pipeline(
+            zuna_enabled=self.config.zuna.enabled,
+            zuna_device=self.config.zuna.device,
+        )
 
     async def start(self):
         acq = Acquisition(self.config.board)
@@ -395,6 +398,7 @@ def main():
     )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--mac", type=str, default="", help="Muse MAC address (e.g. 00:55:DA:B8:2B:1B)")
+    parser.add_argument("--zuna", action="store_true", help="Enable ZUNA 23ch superresolution (requires CUDA GPU)")
     args = parser.parse_args()
 
     config = Config()
@@ -403,6 +407,8 @@ def main():
     if args.synthetic:
         config.board.board_id = -1  # SYNTHETIC_BOARD
         config.board.enable_ppg = False
+    if args.zuna:
+        config.zuna.enabled = True
 
     server = EEGServer(config)
     try:

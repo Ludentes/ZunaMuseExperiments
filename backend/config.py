@@ -26,7 +26,15 @@ class ServerConfig:
 
 
 @dataclass
+class ZunaConfig:
+    enabled: bool = False
+    device: str = "cuda"
+    diffusion_steps: int = 50
+
+
+@dataclass
 class Config:
     board: BoardConfig = field(default_factory=BoardConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    zuna: ZunaConfig = field(default_factory=ZunaConfig)

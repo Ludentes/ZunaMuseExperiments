@@ -40,8 +40,19 @@ class BandPowerBroadcaster(Stage):
         if bp is None:
             return
 
+        # Detect actual channel count from band power result
+        any_band = next(iter(bp.band_powers.values()), [])
+        n_channels = len(any_band)
+
+        # Use ZUNA channel names if we have more than 4 channels
+        if n_channels > len(self.channel_names):
+            from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
+            ch_names = ZUNA_CH_NAMES[:n_channels]
+        else:
+            ch_names = self.channel_names[:n_channels]
+
         channels = {}
-        for i, ch_name in enumerate(self.channel_names):
+        for i, ch_name in enumerate(ch_names):
             raw_vals = {
                 band: bp.band_powers[band][i]
                 for band in BAND_NAMES
@@ -60,7 +71,7 @@ class BandPowerBroadcaster(Stage):
 
             channels[ch_name] = raw_vals
 
-        mode = "4ch" if len(self.channel_names) <= 4 else "23ch"
+        mode = "4ch" if n_channels <= 4 else "23ch"
         frame.set(BandPowerMessage(mode=mode, channels=channels))
 
         # Log for debugging jerkiness

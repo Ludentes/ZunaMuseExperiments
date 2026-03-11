@@ -19,10 +19,18 @@ from backend.pipeline.stages.band_power_broadcaster import BandPowerBroadcaster
 from backend.pipeline.stages.preprocessing import WaveletDenoiser
 
 
-def create_default_pipeline() -> Pipeline:
-    stages = [
+def create_default_pipeline(zuna_enabled: bool = False, zuna_device: str = "cuda") -> Pipeline:
+    stages: list = [
         # SLOW — spectral features, vitals
         WaveletDenoiser(),
+    ]
+
+    # ZUNA: insert before band power extraction so it can replace 4ch with 23ch
+    if zuna_enabled:
+        from backend.pipeline.stages.zuna import ZunaStage
+        stages.append(ZunaStage(device=zuna_device))
+
+    stages.extend([
         BandPowerExtractor(),
         SignalQualityChecker(),
         HeartRateExtractor(),
@@ -33,7 +41,7 @@ def create_default_pipeline() -> Pipeline:
         SpeechDetector(),
         BlinkDetector(),
         # ClenchDetector(),  # disabled: needs tuning on real data
-    ]
+    ])
     actions = [
         LogAction(),
     ]
