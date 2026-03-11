@@ -51,10 +51,16 @@ function updateBaseline(state: BaselineState, values: number[]): void {
       state.min = v;
       state.max = v;
     } else {
-      // EMA toward observed range
-      const alpha = state.samples < 30 ? 0.1 : 0.02;
-      if (v < state.min) state.min += (v - state.min) * alpha;
-      if (v > state.max) state.max += (v - state.max) * alpha;
+      const expandAlpha = state.samples < 30 ? 0.3 : 0.1;  // fast expand
+      const shrinkAlpha = 0.005;  // slow contract toward current range
+
+      // Expand quickly when value is outside range
+      if (v < state.min) state.min += (v - state.min) * expandAlpha;
+      if (v > state.max) state.max += (v - state.max) * expandAlpha;
+
+      // Contract slowly when value is inside range (prevents stuck extremes)
+      if (v > state.min) state.min += (v - state.min) * shrinkAlpha;
+      if (v < state.max) state.max += (v - state.max) * shrinkAlpha;
     }
     state.samples++;
   }
