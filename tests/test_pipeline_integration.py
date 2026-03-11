@@ -58,3 +58,31 @@ def test_pipeline_eeg_values_close():
 
     assert len(old["eeg"]["theta_beta_ratio"]) == len(new["eeg"]["theta_beta_ratio"])
     assert set(old["eeg"]["signal_quality"].keys()) == set(new["eeg"]["signal_quality"].keys())
+
+
+def test_phase1_signals_present_in_full_pipeline():
+    """Verify all Phase 1 signals (eyes-closed, headband state) flow through pipeline."""
+    from backend.pipeline.factory import create_default_pipeline
+    from backend.pipeline.stages.features import EyesClosedResult, HeadbandStateResult
+    from backend.pipeline.serialize import frame_to_metrics
+    from backend.pipeline.types import Cadence, PipelineFrame
+    import numpy as np
+    import time
+
+    pipeline = create_default_pipeline()
+    rng = np.random.default_rng(42)
+    eeg = rng.standard_normal((4, 512)).astype(np.float64) * 50
+
+    frame = PipelineFrame(eeg=eeg, ppg=None, imu=None, timestamp=time.time())
+    pipeline.run(Cadence.SLOW, frame)
+
+    ec = frame.get(EyesClosedResult)
+    assert ec is not None, "EyesClosedResult missing from pipeline output"
+
+    hs = frame.get(HeadbandStateResult)
+    assert hs is not None, "HeadbandStateResult missing from pipeline output"
+    assert hs.state in ("ready", "fitting", "headband_off")
+
+    metrics = frame_to_metrics(frame)
+    assert "eyes_closed" in metrics
+    assert "headband" in metrics
