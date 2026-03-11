@@ -21,7 +21,7 @@ class ServerConfig:
     host: str = "localhost"
     port: int = 8765
     eeg_batch_interval: float = 0.0625  # 16ms (~60fps)
-    metrics_interval: float = 2.0  # need ≥256 EEG samples (1s), 2s gives margin
+    metrics_interval: float = 0.5  # sliding window: compute every 0.5s on 2s of EEG
     recording_dir: str = "recordings"
 
 

@@ -143,7 +143,7 @@ function HeadMesh({ bandPowers, selectedBand, debug, onStats }: HeadMeshProps) {
   const prevElecRef = useRef<number[] | null>(null);
   const targetElecRef = useRef<number[] | null>(null);
   const lerpStartRef = useRef(0);
-  const lerpDurationRef = useRef(2.0); // seconds between updates
+  const lerpDurationRef = useRef(0.5); // seconds between updates (matches backend metrics_interval)
   const baselineRef = useRef<BaselineState>({
     min: 0, max: 1, samples: 0, ready: false,
   });

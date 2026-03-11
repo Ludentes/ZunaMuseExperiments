@@ -44,9 +44,11 @@ class EEGServer:
         self._recording_eeg: list = []
         self._recording_ppg: list = []
         self._recording_imu: list = []
-        self._eeg_buffer = []
-        self._ppg_buffer = []
-        self._imu_buffer = []
+        self._eeg_buffer: list[np.ndarray] = []
+        self._eeg_rolling: np.ndarray | None = None  # rolling 2s window
+        self._eeg_rolling_max = 512  # 2s at 256Hz
+        self._ppg_buffer: list[np.ndarray] = []
+        self._imu_buffer: list[np.ndarray] = []
         self._pipeline = create_default_pipeline()
 
     async def start(self):
@@ -321,16 +323,32 @@ class EEGServer:
             await asyncio.sleep(interval)
 
     async def _metrics_loop(self):
-        """Compute and broadcast derived metrics at configured rate."""
+        """Compute and broadcast derived metrics at configured rate.
+
+        EEG uses a sliding window (2s of data, updated every 0.5s) for stable
+        PSD estimates with frequent updates. PPG/IMU still use accumulate-and-clear
+        since their stages manage their own rolling state.
+        """
         interval = self.config.server.metrics_interval
         while self._running:
             await asyncio.sleep(interval)
 
-            eeg = (
-                np.concatenate(self._eeg_buffer, axis=1)
-                if self._eeg_buffer
-                else None
-            )
+            # EEG: append new chunks to rolling buffer, keep last 2s
+            if self._eeg_buffer:
+                new_eeg = np.concatenate(self._eeg_buffer, axis=1)
+                self._eeg_buffer.clear()
+                if self._eeg_rolling is None:
+                    self._eeg_rolling = new_eeg
+                else:
+                    self._eeg_rolling = np.concatenate(
+                        [self._eeg_rolling, new_eeg], axis=1
+                    )
+                # Trim to max window size
+                if self._eeg_rolling.shape[1] > self._eeg_rolling_max:
+                    self._eeg_rolling = self._eeg_rolling[:, -self._eeg_rolling_max:]
+
+            eeg = self._eeg_rolling  # use full 2s window, don't clear
+
             ppg = (
                 np.concatenate(self._ppg_buffer, axis=1)
                 if self._ppg_buffer
@@ -342,7 +360,6 @@ class EEGServer:
                 else None
             )
 
-            self._eeg_buffer.clear()
             self._ppg_buffer.clear()
             self._imu_buffer.clear()
 
