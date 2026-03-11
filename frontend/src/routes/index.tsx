@@ -12,13 +12,14 @@ import { VitalsPanel } from "../components/VitalsPanel";
 import { MotionPanel } from "../components/MotionPanel";
 import { ControlsPanel } from "../components/ControlsPanel";
 import { RecordingPanel } from "../components/RecordingPanel";
+import { ZunaToggle } from "../components/ZunaToggle";
 
 export const Route = createFileRoute("/")({
   component: Dashboard,
 });
 
 function Dashboard() {
-  const { buffers, metricsRef, isConnected, sendCommand } = useSensorStream();
+  const { buffers, metricsRef, isConnected, sendCommand, zunaStatus } = useSensorStream();
   const metrics = useMetrics(metricsRef);
   const { getBandPowers } = useBandPowers(metrics);
   const [selectedBand, setSelectedBand] = useState<BandName>("focus");
@@ -28,13 +29,16 @@ function Dashboard() {
       {/* Top bar */}
       <div className="flex items-center justify-between h-8 px-2">
         <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>CORTEX</span>
-        <div className="flex items-center gap-2 text-[11px] font-mono" style={{ color: "var(--text-dim)" }}>
-          <span className="inline-block w-2 h-2 rounded-full" style={{
-            background: isConnected ? "var(--status-good)" : "var(--status-bad)",
-            boxShadow: isConnected ? "0 0 6px var(--status-good)" : "none",
-            animation: isConnected ? "pulse 2s infinite" : "none"
-          }} />
-          ws://localhost:8765
+        <div className="flex items-center gap-3 text-[11px] font-mono" style={{ color: "var(--text-dim)" }}>
+          <ZunaToggle zunaStatus={zunaStatus} sendCommand={sendCommand} />
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full" style={{
+              background: isConnected ? "var(--status-good)" : "var(--status-bad)",
+              boxShadow: isConnected ? "0 0 6px var(--status-good)" : "none",
+              animation: isConnected ? "pulse 2s infinite" : "none"
+            }} />
+            ws://localhost:8765
+          </div>
         </div>
       </div>
 
@@ -44,6 +48,8 @@ function Dashboard() {
         fitStatus={metrics?.eeg?.fit_status}
         motionArtifact={metrics?.imu?.motion_artifact}
         jawClench={metrics?.imu?.jaw_clench}
+        headbandState={metrics?.headband}
+        eyesClosed={metrics?.eyes_closed}
       />
 
       {/* EEG Waveforms */}
@@ -63,6 +69,8 @@ function Dashboard() {
           bandPowers={metrics?.eeg?.band_powers}
           thetaBetaRatio={metrics?.eeg?.theta_beta_ratio}
           faa={metrics?.eeg?.frontal_alpha_asymmetry}
+          concentration={metrics?.brain?.concentration}
+          relaxation={metrics?.brain?.relaxation}
         />
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--gap)" }}>
           <VitalsPanel

@@ -10,9 +10,11 @@ interface Props {
   bandPowers?: Record<string, number[]>;
   thetaBetaRatio?: number[];
   faa?: number;
+  concentration?: number;
+  relaxation?: number;
 }
 
-export function BrainMetrics({ bandPowers, thetaBetaRatio, faa }: Props) {
+export function BrainMetrics({ bandPowers, thetaBetaRatio, faa, concentration, relaxation }: Props) {
   // Find max power for normalization
   const allPowers = bandPowers
     ? Object.values(bandPowers).flatMap((v) => v)
@@ -70,6 +72,47 @@ export function BrainMetrics({ bandPowers, thetaBetaRatio, faa }: Props) {
           </span>
         </div>
       </div>
+
+      {/* Concentration / Relaxation */}
+      {(concentration != null || relaxation != null) && (
+        <>
+          <div className="text-[12px] uppercase tracking-wider mt-4 mb-2" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-label)" }}>
+            BCI State
+          </div>
+          <div className="space-y-1.5">
+            {concentration != null && (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] w-16" style={{ color: "var(--text-secondary)" }}>Focus</span>
+                <div className="flex-1 h-2" style={{ background: "var(--bg-input)" }}>
+                  <div className="h-full transition-all" style={{
+                    width: `${concentration * 100}%`,
+                    background: "var(--band-beta)",
+                    opacity: 0.7,
+                  }} />
+                </div>
+                <span className="text-[13px] font-mono w-10 text-right" style={{ color: "var(--text-primary)" }}>
+                  {(concentration * 100).toFixed(0)}%
+                </span>
+              </div>
+            )}
+            {relaxation != null && (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] w-16" style={{ color: "var(--text-secondary)" }}>Relax</span>
+                <div className="flex-1 h-2" style={{ background: "var(--bg-input)" }}>
+                  <div className="h-full transition-all" style={{
+                    width: `${relaxation * 100}%`,
+                    background: "var(--band-alpha)",
+                    opacity: 0.7,
+                  }} />
+                </div>
+                <span className="text-[13px] font-mono w-10 text-right" style={{ color: "var(--text-primary)" }}>
+                  {(relaxation * 100).toFixed(0)}%
+                </span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

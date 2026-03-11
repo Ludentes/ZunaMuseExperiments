@@ -58,6 +58,19 @@ export interface Metrics {
     motion_artifact: boolean;
     jaw_clench: boolean;
   };
+  brain?: {
+    concentration: number;
+    relaxation: number;
+  };
+  eyes_closed?: {
+    active: boolean;
+    alpha_ratio: number;
+    baseline_alpha: number;
+  };
+  headband?: {
+    state: "ready" | "fitting" | "headband_off";
+    seconds_in_state: number;
+  };
   session?: {
     recording: boolean;
     label: string | null;

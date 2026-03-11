@@ -5,12 +5,23 @@ interface Props {
   fitStatus?: "good" | "adjust" | "poor";
   motionArtifact?: boolean;
   jawClench?: boolean;
+  headbandState?: { state: "ready" | "fitting" | "headband_off"; seconds_in_state: number };
+  eyesClosed?: { active: boolean; alpha_ratio: number };
 }
 
-export function FitTool({ signalQuality, fitStatus, motionArtifact, jawClench }: Props) {
+export function FitTool({ signalQuality, fitStatus, motionArtifact, jawClench, headbandState, eyesClosed }: Props) {
   const statusColor = fitStatus === "good" ? "var(--status-good)"
     : fitStatus === "adjust" ? "var(--status-warn)"
     : "var(--status-bad)";
+
+  const headbandColor = headbandState?.state === "ready" ? "var(--status-good)"
+    : headbandState?.state === "fitting" ? "var(--status-warn)"
+    : "var(--status-bad)";
+
+  const headbandLabel = headbandState?.state === "ready" ? "READY"
+    : headbandState?.state === "fitting" ? "FITTING"
+    : headbandState?.state === "headband_off" ? "OFF"
+    : "---";
 
   return (
     <div className="p-3 border-b" style={{ borderColor: "var(--border)" }}>
@@ -45,13 +56,24 @@ export function FitTool({ signalQuality, fitStatus, motionArtifact, jawClench }:
           })}
         </div>
 
-        {/* Status */}
-        <div className="text-right">
-          <div className="text-sm font-mono font-semibold uppercase" style={{ color: statusColor }}>
-            {fitStatus ?? "---"}
+        {/* Status column */}
+        <div className="text-right space-y-1">
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-[9px] uppercase px-1.5 py-0.5 border font-mono" style={{ color: headbandColor, borderColor: headbandColor }}>
+              {headbandLabel}
+            </span>
+            <span className="text-sm font-mono font-semibold uppercase" style={{ color: statusColor }}>
+              {fitStatus ?? "---"}
+            </span>
           </div>
           <div className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-            Motion: {motionArtifact ? "⚠ MOVING" : "still"} | Jaw: {jawClench ? "⚠ CLENCH" : "clear"}
+            Motion: {motionArtifact ? "MOVING" : "still"} | Jaw: {jawClench ? "CLENCH" : "clear"}
+          </div>
+          <div className="text-[11px] font-mono" style={{
+            color: eyesClosed?.active ? "var(--band-alpha)" : "var(--text-dim)",
+          }}>
+            Eyes: {eyesClosed?.active ? "CLOSED" : "open"}
+            {eyesClosed?.alpha_ratio ? ` (${eyesClosed.alpha_ratio.toFixed(1)}x)` : ""}
           </div>
         </div>
       </div>

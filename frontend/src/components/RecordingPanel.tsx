@@ -22,6 +22,7 @@ const PROTOCOLS: Protocol[] = [
   { label: "eyebrow_furrow",trialDuration: 3, cueAt: 1,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
   { label: "talk",         trialDuration: 5, cueAt: 0.5, reps: 10, restBetween: 2, instruction: "Say any word at the cue" },
   { label: "eyes_closed",  trialDuration: 30, cueAt: 0,  reps: 3,  restBetween: 5, instruction: "Close eyes, relax — keep still" },
+  { label: "eyes_closed_tight", trialDuration: 30, cueAt: 0, reps: 5, restBetween: 5, instruction: "Close eyes TIGHTLY, squeeze — maximize alpha blocking" },
   { label: "eyes_open",    trialDuration: 30, cueAt: 0,  reps: 3,  restBetween: 5, instruction: "Eyes open, stare at screen — keep still" },
   // Experiment A: Engagement/attention
   { label: "meditation",   trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Close eyes, slow breathing, count breaths" },
