@@ -28,7 +28,7 @@ function Dashboard() {
     <div className="min-h-screen p-2 space-y-2" style={{ background: "var(--bg-base)", color: "var(--text-primary)" }}>
       {/* Top bar */}
       <div className="flex items-center justify-between h-8 px-2">
-        <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>CORTEX</span>
+        <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>EUTERPE</span>
         <div className="flex items-center gap-3 text-[11px] font-mono" style={{ color: "var(--text-dim)" }}>
           <ZunaToggle zunaStatus={zunaStatus} sendCommand={sendCommand} />
           <div className="flex items-center gap-2">

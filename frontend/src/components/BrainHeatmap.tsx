@@ -77,16 +77,8 @@ interface ElectrodeData {
   };
 }
 
-// Channel names we care about
+// Default channel names (Muse 4ch)
 const MUSE_CHANNELS = ["TP9", "AF7", "AF8", "TP10"];
-const ZUNA_CHANNELS = [
-  "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
-  "AF7", "AF8",
-  "T7", "T8", "TP9", "TP10",
-  "C3", "Cz", "C4",
-  "P7", "P3", "Pz", "P4", "P8",
-  "O1", "O2",
-];
 
 // --- IDW interpolation for brain mesh ---
 function computeBrainWeights(
@@ -471,13 +463,13 @@ function BrainScene({
     return geo;
   }, [gltf]);
 
-  // Determine channel set
+  // Derive channel set from bandPowers keys (avoids duplicating backend channel list)
   const channelNames = useMemo(() => {
     if (bandPowers && Object.keys(bandPowers.channels).length > 4) {
-      return ZUNA_CHANNELS;
+      return Object.keys(bandPowers.channels);
     }
     return MUSE_CHANNELS;
-  }, [bandPowers?.mode]);
+  }, [bandPowers?.mode, bandPowers && Object.keys(bandPowers.channels).join(",")]);
 
   if (!brainGeometry || !electrodeData) {
     return null; // Loading
@@ -485,10 +477,10 @@ function BrainScene({
 
   return (
     <>
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[2, 3, 4]} intensity={0.5} />
-      <directionalLight position={[-2, 3, -4]} intensity={0.5} />
-      <directionalLight position={[0, -2, 0]} intensity={0.2} />
+      <ambientLight intensity={0.9} />
+      <directionalLight position={[2, 3, 4]} intensity={0.7} />
+      <directionalLight position={[-2, 3, -4]} intensity={0.7} />
+      <directionalLight position={[0, -2, 0]} intensity={0.3} />
       <BrainMesh
         geometry={brainGeometry}
         electrodeData={electrodeData}
@@ -514,7 +506,14 @@ export interface BrainHeatmapProps {
   bandPowers: BandPowers | null;
   selectedBand?: BandName;
   debug?: "static" | "wave" | "random";
-  height?: number;
+  height?: number | string;
+}
+
+// Force clean remount on HMR — each module reload increments the key,
+// so React unmounts the old Canvas (freeing the WebGL context) before mounting a new one.
+let _hmrKey = 0;
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => { _hmrKey++; });
 }
 
 export function BrainHeatmap({
@@ -525,21 +524,51 @@ export function BrainHeatmap({
 }: BrainHeatmapProps) {
   const mode = bandPowers?.mode ?? "4ch";
   const [stats, setStats] = useState<HeatmapStats | null>(null);
+  const [mounted, setMounted] = useState(false);
   const handleStats = useCallback((s: HeatmapStats) => setStats(s), []);
+
+  // Defer Canvas creation until after first client-side mount.
+  // TanStack Start (even in SPA mode) may render components twice during
+  // hydration — creating and immediately destroying a WebGL context.
+  // This guard ensures we only create the Canvas once, on a stable mount.
+  useEffect(() => {
+    // Small delay to let any double-mount settle
+    const id = requestAnimationFrame(() => setMounted(true));
+    return () => {
+      cancelAnimationFrame(id);
+      setMounted(false);
+    };
+  }, []);
 
   return (
     <div>
-      <Canvas
-        style={{ height, background: "#0a0a0f" }}
-        camera={{ position: [0, 0.6, 2.2], fov: 42 }}
-      >
-        <BrainScene
-          bandPowers={bandPowers}
-          selectedBand={selectedBand}
-          debug={debug}
-          onStats={handleStats}
-        />
-      </Canvas>
+      {!mounted ? (
+        <div style={{
+          height,
+          background: "#0a0a0f",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#444",
+          fontSize: 12,
+          fontFamily: "monospace",
+        }}>
+          Initializing 3D...
+        </div>
+      ) : (
+        <Canvas
+          key={_hmrKey}
+          style={{ height, background: "#0a0a0f" }}
+          camera={{ position: [0, 0.6, 2.2], fov: 42 }}
+        >
+          <BrainScene
+            bandPowers={bandPowers}
+            selectedBand={selectedBand}
+            debug={debug}
+            onStats={handleStats}
+          />
+        </Canvas>
+      )}
       <Legend selectedBand={selectedBand} stats={stats} />
       <Disclaimer mode={mode} />
     </div>
