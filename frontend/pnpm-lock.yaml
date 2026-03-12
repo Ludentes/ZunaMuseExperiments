@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@types/three': 0.183.1
+
 importers:
 
   .:
@@ -106,7 +109,7 @@ importers:
         specifier: ^19.2.0
         version: 19.2.3(@types/react@19.2.14)
       '@types/three':
-        specifier: ^0.183.1
+        specifier: 0.183.1
         version: 0.183.1
       '@vitejs/plugin-react':
         specifier: ^5.1.4
@@ -2277,7 +2280,7 @@ packages:
   maath@0.10.8:
     resolution: {integrity: sha512-tRvbDF0Pgqz+9XUa4jjfgAQ8/aPKmQdWXilFu2tMy4GWj4NOsx99HlULO4IeREfbO3a0sA145DZYyvXPkybm0g==}
     peerDependencies:
-      '@types/three': '>=0.134.0'
+      '@types/three': 0.183.1
       three: '>=0.134.0'
 
   magic-string@0.30.21:
@@ -2753,7 +2756,7 @@ packages:
   stats-gl@2.4.2:
     resolution: {integrity: sha512-g5O9B0hm9CvnM36+v7SFl39T7hmAlv541tU81ME8YeSb3i1CIP5/QdDeSB3A0la0bKNHpxpwxOVRo2wFTYEosQ==}
     peerDependencies:
-      '@types/three': '*'
+      '@types/three': 0.183.1
       three: '*'
 
   stats.js@0.17.0:

@@ -4,15 +4,17 @@ import type { BciEvent } from "../../lib/protocol";
 const KIND_COLORS: Record<string, string> = {
   single_blink: "var(--text-primary)",
   double_blink: "var(--text-primary)",
-  triple_blink: "var(--text-primary)",
   clench: "var(--status-warn)",
+  nod_yes: "var(--status-good)",
+  nod_no: "var(--status-bad)",
 };
 
 const KIND_ACTIONS: Record<string, string> = {
   single_blink: "blink detected",
   double_blink: "kiosk → next",
-  triple_blink: "light → toggle",
   clench: "clench detected",
+  nod_yes: "nod → yes",
+  nod_no: "shake → no",
 };
 
 function formatTime(ts: number): string {

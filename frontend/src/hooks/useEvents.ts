@@ -12,15 +12,18 @@ export function useEvents(
 ) {
   const [events, setEvents] = useState<BciEvent[]>([]);
   const [lastEvent, setLastEvent] = useState<BciEvent | null>(null);
-  const prevLenRef = useRef(0);
+  const lastTimestampRef = useRef(0);
 
   useEffect(() => {
     const interval = setInterval(() => {
       const current = eventsRef.current;
-      if (current.length !== prevLenRef.current) {
-        prevLenRef.current = current.length;
-        setEvents([...current]);
-        setLastEvent(current[current.length - 1] ?? null);
+      if (current.length === 0) return;
+      const newest = current[current.length - 1];
+      if (newest.timestamp !== lastTimestampRef.current) {
+        lastTimestampRef.current = newest.timestamp;
+        const copy = [...current];
+        setEvents(copy);
+        setLastEvent(newest);
       }
     }, pollRateMs);
     return () => clearInterval(interval);

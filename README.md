@@ -8,89 +8,113 @@ BCI experimentation platform: Muse 2 EEG headband → Python backend (BrainFlow 
 - Node 22+, pnpm
 - [BrainFlow](https://brainflow.readthedocs.io/) (`pip install brainflow`)
 - Muse 2 headband (or use `--synthetic` for simulated data)
+- Linux with Bluetooth/bluez (for real hardware only)
 
-## Quickstart
+## Quick Setup
+
+```bash
+./setup.sh
+```
+
+Or manually:
+
+```bash
+pip install -r backend/requirements.txt
+pip install brainflow
+cd frontend && pnpm install
+```
+
+## Running
 
 ### Terminal 1: Backend
 
 ```bash
-pip install -r backend/requirements.txt
-
-# With Muse hardware (requires bluez + BLE adapter)
-python -m backend.main --mac "XX:XX:XX:XX:XX:XX"  # your Muse MAC
-
-# Without hardware (synthetic board — BrainFlow generates fake EEG)
+# Without hardware (synthetic board — generates fake EEG)
 python -m backend.main --synthetic
-```
 
-Backend starts a WebSocket server on `ws://localhost:8765`.
-
-### BrainFlow Setup
-
-BrainFlow handles all hardware communication. For Muse 2 on Linux:
-
-```bash
-pip install brainflow
-
-# Ensure bluetooth is running
-sudo systemctl start bluetooth
-
-# Find your Muse MAC address (power on Muse, then scan)
-bluetoothctl scan on
-# Look for "Muse-XXXX", note the MAC address
-
-# Start backend with your MAC
+# With Muse hardware
 python -m backend.main --mac "XX:XX:XX:XX:XX:XX"
 ```
 
-BrainFlow uses board_id=38 (`MUSE_2_BOARD`). The `--synthetic` flag uses board_id=-1 (synthetic board) which generates realistic EEG waveforms without hardware.
+Backend starts a WebSocket server on `ws://localhost:8765`.
 
 ### Terminal 2: Frontend
 
 ```bash
 cd frontend
-pnpm install
 pnpm dev
 ```
 
-Open http://localhost:3000 — live EEG waveforms, recording controls, real-time metrics.
+- **Dashboard**: http://localhost:3000 — live EEG waveforms, recording controls, metrics
+- **EUTERPE Demo**: http://localhost:3000/demo — brain-to-light control demo with event log
+
+### BrainFlow + Muse 2 Setup
+
+```bash
+sudo systemctl start bluetooth
+bluetoothctl scan on        # power on Muse, look for "Muse-XXXX"
+python -m backend.main --mac "XX:XX:XX:XX:XX:XX"
+```
 
 ## Architecture
 
 ```
 backend/
-├── main.py            # EEGServer — WebSocket streaming, recording, command handling
-├── acquisition.py     # BrainFlow board wrapper with connection resilience
+├── main.py            # EEGServer — WebSocket streaming, recording, commands
+├── acquisition.py     # BrainFlow board wrapper with reconnection
 ├── config.py          # Board, filter, server configuration
 └── pipeline/          # Pluggable real-time processing stages
     ├── factory.py     # Pipeline assembly
     └── stages/
-        └── detectors.py  # BlinkDetector v5 (F1=0.95), SpeechDetector, ClenchDetector
+        ├── detectors.py      # BlinkDetector, NodDetector, SpeechDetector, ClenchDetector
+        ├── features.py       # Band powers, concentration, signal quality, eyes-closed
+        └── preprocessing.py  # Wavelet denoising
 
 frontend/
 ├── src/
-│   ├── routes/index.tsx           # Dashboard with live waveforms
-│   └── components/
-│       ├── RecordingPanel.tsx     # Cued protocol recording UI
-│       ├── WaveformDisplay.tsx    # Canvas 2D waveform rendering
-│       └── MetricsPanel.tsx       # Band powers, heart rate, concentration
+│   ├── routes/
+│   │   ├── index.tsx          # Dashboard with live waveforms
+│   │   └── demo.tsx           # EUTERPE demo page
+│   ├── components/
+│   │   ├── BrainHeatmap.tsx   # 3D brain visualization (R3F)
+│   │   ├── RecordingPanel.tsx # Cued protocol recording UI
+│   │   └── demo/              # Demo-specific components
+│   ├── hooks/
+│   │   ├── useSensorStream.ts # WebSocket data hook
+│   │   ├── useMetrics.ts      # Metrics polling
+│   │   └── useEvents.ts       # BCI event polling
+│   └── lib/
+│       ├── protocol.ts        # Binary frame decoder
+│       └── ringBuffer.ts      # Circular buffer for waveforms
 
 scripts/
-├── eval_blink_detector.py  # Detector evaluation harness
-├── eval_zuna_alpha.py      # ZUNA superresolution evaluation
-├── run_zuna.py             # ZUNA signal reconstruction pipeline
-├── experiment.py           # Experiment tracking (config/results/artifacts)
-└── diagnose_data.py        # Recording quality diagnostics
+├── eval_blink_detector.py     # Detector evaluation harness
+├── analyze_blink_params.py    # Blink parameter sweep
+├── analyze_nod_imu.py         # IMU nod analysis
+├── experiment.py              # Experiment tracking
+└── run_zuna.py                # ZUNA signal reconstruction
 
-recordings/               # Saved trials (.npz + .fif)
-experiments/              # Tracked experiment runs + registry.csv
-docs/research/            # Research notes and validated findings
+recordings/                    # Saved trials (.npz + .fif) — not in git
+experiments/                   # Tracked experiment runs
+docs/research/                 # Research notes and findings
 ```
+
+## BCI Event Detection
+
+| Event | Method | Accuracy | Input |
+|-------|--------|----------|-------|
+| single_blink | Adaptive threshold + 5 guards | F1=0.88 | EEG (AF7+AF8) |
+| double_blink | Refractory + classify window | ~70% | EEG (AF7+AF8) |
+| nod_yes | Gyro pitch threshold (40 deg/s) | 100% | IMU gyroscope |
+| nod_no | Gyro yaw threshold (100 deg/s) | 100% | IMU gyroscope |
+| eyes_closed | Alpha power ratio | ~90% | EEG (all channels) |
+| concentration | Theta/beta ratio | ~75% | EEG (AF7+AF8) |
 
 ## Protocol
 
 - **Sensor data**: Binary WebSocket frames (1B type + 2B channels + 2B samples + float32 data)
-- **Metrics/events**: JSON messages over the same WebSocket
+- **Metrics**: JSON messages over the same WebSocket (band powers, HR, concentration, etc.)
+- **BCI events**: JSON `{"type": "bci_event", "kind": "single_blink", "confidence": 0.9, ...}`
 
 ## Muse 2 Channels
 
@@ -104,16 +128,15 @@ docs/research/            # Research notes and validated findings
 
 The dashboard has a cued protocol recorder: countdown → beep cue → record → rest → repeat. Recordings save to `recordings/<label>/` as `.npz` (raw numpy) and `.fif` (MNE format with standard_1020 montage).
 
-Available protocols: baseline, rest, single/double/triple blink, clench, eyebrow raise/furrow, talk, eyes closed/open.
+Available protocols: baseline, rest, single/double blink, clench, eyebrow raise/furrow, talk, eyes closed/open, nod yes/no, head still, meditation, mental math.
 
-## Running Tests
+## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-## Hardware Notes
+## Hardware Safety
 
 - **Never kill the server while Muse is connected** — forces BLE disconnect, may require Muse power cycle + `sudo systemctl restart bluetooth`
 - Use `--synthetic` for development without hardware
-- BrainFlow board_id=38 (MUSE_2_BOARD)

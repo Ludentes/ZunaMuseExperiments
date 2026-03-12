@@ -30,10 +30,11 @@ ZUNA_CH_NAMES = [
 ]
 
 # Channels to add beyond Muse 4ch (passed to ZUNA preprocessing)
+# Use modern 10-20 names (T7=T3, T8=T4, P7=T5, P8=T6 — same positions in MNE)
 CHANNELS_TO_ADD = [
     "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
-    "T3", "C3", "Cz", "C4", "T4",
-    "T5", "P3", "Pz", "P4", "T6",
+    "T7", "C3", "Cz", "C4", "T8",
+    "P7", "P3", "Pz", "P4", "P8",
     "O1", "O2",
 ]
 
@@ -109,20 +110,33 @@ def load_zuna_model(device: str = "cuda"):
     return model, model_args, dev
 
 
+@dataclass
+class NormParams:
+    """Z-score normalization parameters for reversing after ZUNA inference."""
+    mean: float
+    std: float
+
+
 def preprocess_epoch(
     eeg_4ch: np.ndarray,
     sfreq: float = 256.0,
-) -> tuple[np.ndarray, np.ndarray]:
+    skip_filtering: bool = False,
+) -> tuple[np.ndarray, np.ndarray, NormParams]:
     """Preprocess a 4ch epoch for ZUNA inference.
 
-    1. Notch filter (50Hz)
-    2. Highpass (0.5Hz)
-    3. Spherical spline interpolation (4ch → 23ch)
-    4. Z-score normalize
+    1. Notch filter (50Hz) + Highpass (0.5Hz) — skipped if already denoised
+    2. Spherical spline interpolation (4ch → 23ch)
+    3. Z-score normalize
+
+    Args:
+        eeg_4ch: (4, n_samples) raw EEG in µV
+        sfreq: sampling rate
+        skip_filtering: if True, skip notch/highpass (data already filtered)
 
     Returns:
-        eeg_23ch: (23, n_samples) preprocessed array
+        eeg_23ch: (23, n_samples) z-scored array
         chan_pos: (23, 3) channel positions in meters (MNE standard)
+        norm: z-score params to reverse normalization after inference
     """
     import mne
 
@@ -133,40 +147,46 @@ def preprocess_epoch(
     montage = mne.channels.make_standard_montage("standard_1020")
     raw.set_montage(montage)
 
-    # Notch + highpass
-    raw.notch_filter(50.0, verbose=False)
-    raw.filter(l_freq=0.5, h_freq=None, verbose=False)
+    if not skip_filtering:
+        raw.notch_filter(50.0, verbose=False)
+        raw.filter(l_freq=0.5, h_freq=None, verbose=False)
 
-    # Interpolate to 23ch using spherical spline
+    # Interpolate to 23ch: create 23ch Raw with 4ch data, mark 19 as bad, interpolate
     all_ch = ch_names + CHANNELS_TO_ADD
-    # Use MNE's interpolation: create virtual channels
     full_montage = mne.channels.make_standard_montage("standard_1020")
-    full_info = mne.create_info(ch_names=all_ch, sfreq=sfreq, ch_types="eeg")
-    full_info.set_montage(full_montage)
 
     # Get channel positions for all 23 channels
     ch_pos_dict = full_montage.get_positions()["ch_pos"]
     chan_pos = np.array([ch_pos_dict[ch] for ch in all_ch], dtype=np.float32)
 
-    # Interpolate missing channels using spherical spline
-    from mne.channels.interpolation import _make_interpolation_matrix
-    pos_from = np.array([ch_pos_dict[ch] for ch in ch_names])
-    pos_to = np.array([ch_pos_dict[ch] for ch in all_ch])
-    interp_matrix = _make_interpolation_matrix(pos_from, pos_to)
-
+    # Build full 23ch Raw with zeros for missing channels, then interpolate
     data_4ch = raw.get_data()  # (4, n_samples) in V
-    data_23ch = interp_matrix @ data_4ch  # (23, n_samples)
+    n_samples = data_4ch.shape[1]
+    data_23ch = np.zeros((len(all_ch), n_samples), dtype=np.float64)
+    for i, ch in enumerate(ch_names):
+        idx = all_ch.index(ch)
+        data_23ch[idx] = data_4ch[i]
+
+    full_info = mne.create_info(ch_names=all_ch, sfreq=sfreq, ch_types="eeg")
+    full_raw = mne.io.RawArray(data_23ch, full_info, verbose=False)
+    full_raw.set_montage(full_montage)
+
+    # Mark channels without real data as bad, then interpolate via public API
+    full_raw.info["bads"] = CHANNELS_TO_ADD
+    full_raw.interpolate_bads(verbose=False)
+
+    data_23ch_v = full_raw.get_data()  # (23, n_samples) in V
 
     # Convert back to µV for downstream
-    data_23ch_uv = data_23ch * 1e6
+    data_23ch_uv = data_23ch_v * 1e6
 
-    # Z-score normalize
-    mean = data_23ch_uv.mean()
-    std = data_23ch_uv.std()
+    # Z-score normalize (save params for un-z-scoring after inference)
+    mean = float(data_23ch_uv.mean())
+    std = float(data_23ch_uv.std())
     if std > 0:
         data_23ch_uv = (data_23ch_uv - mean) / std
 
-    return data_23ch_uv.astype(np.float32), chan_pos
+    return data_23ch_uv.astype(np.float32), chan_pos, NormParams(mean=mean, std=std)
 
 
 def build_model_input(
@@ -256,6 +276,11 @@ def reconstruct_from_output(
     if z.dim() == 3:
         z = z.squeeze(0)  # (seqlen, 32)
 
+    if z.shape[0] % n_channels != 0:
+        raise ValueError(
+            f"Model output seqlen {z.shape[0]} is not divisible by n_channels {n_channels}"
+        )
+
     # Denormalize
     z = z * data_norm
 
@@ -280,27 +305,33 @@ class ZunaStage(Stage):
     name = "zuna_stage"
     cadence = Cadence.SLOW
 
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str = "cuda", diffusion_steps: int = 50):
         log.info("Initializing ZunaStage...")
         t0 = time.time()
         self.model, self.model_args, self.device = load_zuna_model(device)
         self.load_time = time.time() - t0
         log.info("ZunaStage ready (loaded in %.1fs)", self.load_time)
+        log.info("First inference will be slow (~60-90s) due to torch.compile warmup")
+        self.enabled = True  # can be toggled at runtime via WebSocket
 
         self.sfreq = 256
         self.epoch_samples = 1280  # 5s at 256Hz
         self.hop_samples = 256    # 1s hop → 1Hz output
         self.tf = 32              # fine time points per token
-        self.data_norm = 10.0
         self.num_bins = 50
-        self.diffusion_steps = 50
+        self.diffusion_steps = diffusion_steps
 
+        # Read data_norm from model config if available, else default
+        self.data_norm = getattr(self.model_args, "data_norm", 10.0)
+
+        # Cap buffer at 2x epoch to prevent unbounded growth
+        self._buffer_max = self.epoch_samples * 2
         self._buffer: np.ndarray | None = None  # (4, accumulated_samples)
-        self._norm_mean: float = 0.0
-        self._norm_std: float = 1.0
         self._last_result: ZunaResult | None = None
 
     def process(self, frame: PipelineFrame) -> None:
+        if not self.enabled:
+            return
         if frame.eeg is None or frame.eeg.shape[1] == 0:
             return
 
@@ -309,6 +340,10 @@ class ZunaStage(Stage):
             self._buffer = frame.eeg.copy()
         else:
             self._buffer = np.concatenate([self._buffer, frame.eeg], axis=1)
+
+        # Cap buffer to prevent unbounded growth
+        if self._buffer.shape[1] > self._buffer_max:
+            self._buffer = self._buffer[:, -self._buffer_max:]
 
         # Not enough data yet
         if self._buffer.shape[1] < self.epoch_samples:
@@ -330,7 +365,11 @@ class ZunaStage(Stage):
             if elapsed > 5.0:
                 log.warning("ZUNA inference took %.1fs (>5s), may cause lag", elapsed)
             else:
-                log.info("ZUNA inference: %.2fs, output shape %s", elapsed, result_23ch.shape)
+                log.debug("ZUNA inference: %.2fs, output shape %s", elapsed, result_23ch.shape)
+
+            # Check enabled again — user may have toggled during inference
+            if not self.enabled:
+                return
 
             self._last_result = ZunaResult(
                 eeg_23ch=result_23ch,
@@ -338,13 +377,22 @@ class ZunaStage(Stage):
             )
             frame.set(self._last_result)
 
-            # Replace frame.eeg with 23ch for downstream stages
-            frame.eeg = result_23ch
+            # Store 23ch as separate result — do NOT replace frame.eeg
+            # Downstream stages (SignalQualityChecker, FAA) expect original 4ch layout
 
         except Exception:
             log.exception("ZUNA inference failed, falling back to 4ch")
             if self._last_result is not None:
                 frame.set(self._last_result)
+
+    def unload(self):
+        """Release GPU memory by moving model to CPU and clearing caches."""
+        if hasattr(self, "model") and self.model is not None:
+            self.model.cpu()
+            self.model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            log.info("ZUNA model unloaded, GPU memory freed")
 
     def _run_inference(self, epoch_4ch: np.ndarray) -> np.ndarray:
         """Run full ZUNA pipeline on a 4ch epoch.
@@ -355,8 +403,9 @@ class ZunaStage(Stage):
         Returns:
             (23, 1280) reconstructed EEG (z-scored, then denormalized)
         """
-        # Preprocess: filter + interpolate to 23ch + normalize
-        eeg_23ch, chan_pos = preprocess_epoch(epoch_4ch, self.sfreq)
+        # Preprocess: interpolate to 23ch + normalize
+        # skip_filtering=True because WaveletDenoiser already ran upstream
+        eeg_23ch, chan_pos, norm = preprocess_epoch(epoch_4ch, self.sfreq, skip_filtering=True)
 
         n_channels = eeg_23ch.shape[0]
 
@@ -381,5 +430,9 @@ class ZunaStage(Stage):
 
         # Reconstruct (n_channels, n_samples) from model output
         result = reconstruct_from_output(z, n_channels, tf=self.tf, data_norm=self.data_norm)
+
+        # Reverse z-score normalization back to µV scale
+        if norm.std > 0:
+            result = result * norm.std + norm.mean
 
         return result

@@ -1,0 +1,25 @@
+{
+  "id": "20260312-231410-blink-v6-optimized",
+  "name": "blink-v6-optimized",
+  "timestamp": "20260312-231410",
+  "tags": [
+    "optimized"
+  ],
+  "git_sha": "ed231c6",
+  "git_dirty": true,
+  "params": {
+    "threshold_uv": -50,
+    "threshold_sd": 4.0,
+    "max_hf_ratio": 3.5,
+    "hf_window_samples": 128,
+    "max_deflection_ms": 200,
+    "refractory_ms": 300,
+    "classify_window_ms": 800,
+    "n_rest": 30,
+    "n_single": 56,
+    "n_double": 40,
+    "n_clench": 20,
+    "n_talk": 13
+  },
+  "elapsed_s": 0.0
+}

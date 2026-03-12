@@ -16,7 +16,6 @@ const PROTOCOLS: Protocol[] = [
   { label: "rest",         trialDuration: 5, cueAt: 0,   reps: 5,  restBetween: 2, instruction: "Relax, do nothing" },
   { label: "single_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Blink once at the cue" },
   { label: "double_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Double blink at the cue" },
-  { label: "triple_blink", trialDuration: 4, cueAt: 1,   reps: 20, restBetween: 2.5, instruction: "Triple blink at the cue" },
   { label: "clench",       trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Clench jaw briefly at the cue" },
   { label: "eyebrow_raise",trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Raise both eyebrows at the cue" },
   { label: "eyebrow_furrow",trialDuration: 3, cueAt: 1,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
@@ -35,6 +34,11 @@ const PROTOCOLS: Protocol[] = [
   { label: "ssvep_none",   trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the static pattern (control)", flickerHz: 0 },
   // Experiment C: Fz neurofeedback validation
   { label: "drowsy",       trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Eyes closed, let your mind wander — don't try to focus" },
+  { label: "mentally_fatigued", trialDuration: 60, cueAt: 0, reps: 3, restBetween: 10, instruction: "Record as-is when feeling mentally tired — eyes open, normal posture" },
+  // IMU / head gesture protocols
+  { label: "nod_yes",       trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Nod head YES once at the cue (chin down then up)" },
+  { label: "nod_no",        trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Shake head NO once at the cue (left-right)" },
+  { label: "head_still",    trialDuration: 5, cueAt: 0,   reps: 10, restBetween: 2, instruction: "Keep head completely still — control baseline" },
   // Experiment D: Low-frequency photic driving validation
   { label: "flicker_3hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 3 },
   { label: "flicker_4hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 4 },  // 4Hz: 7.5 frames/half — slight jitter but still usable

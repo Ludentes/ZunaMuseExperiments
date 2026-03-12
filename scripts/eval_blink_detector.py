@@ -61,8 +61,8 @@ def run_detector_on_trial(trial: dict, threshold: float) -> list[str]:
     speech_detector = SpeechDetector()
     detector = BlinkDetector(
         threshold_uv=threshold,
-        refractory_ms=300,
-        classify_window_ms=800,
+        refractory_ms=100,
+        classify_window_ms=1000,
     )
     eeg = trial["eeg"]
     sfreq = trial["sfreq"]

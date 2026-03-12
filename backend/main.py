@@ -20,7 +20,11 @@ from backend.protocol import (
     encode_metrics,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
+    datefmt="%H:%M:%S",
+)
 log = logging.getLogger("eeg-server")
 BoardShim.set_log_level(3)  # WARN only — suppress noisy BrainFlow C library logs
 DataFilter.set_log_level(3)
@@ -49,9 +53,11 @@ class EEGServer:
         self._eeg_rolling_max = 512  # 2s at 256Hz
         self._ppg_buffer: list[np.ndarray] = []
         self._imu_buffer: list[np.ndarray] = []
+        self._latest_imu: np.ndarray | None = None  # most recent IMU chunk for FAST stages
         self._pipeline = create_default_pipeline(
             zuna_enabled=self.config.zuna.enabled,
             zuna_device=self.config.zuna.device,
+            zuna_diffusion_steps=self.config.zuna.diffusion_steps,
         )
 
     async def start(self):
@@ -80,6 +86,13 @@ class EEGServer:
     async def _handle_client(self, ws):
         self.clients.add(ws)
         log.info("Client connected (%d total)", len(self.clients))
+        # Send zuna availability status to new client
+        zuna_stage = self._get_zuna_stage()
+        await ws.send(json.dumps({
+            "type": "zuna_status",
+            "available": zuna_stage is not None,
+            "enabled": zuna_stage.enabled if zuna_stage else False,
+        }))
         try:
             async for message in ws:
                 await self._handle_command(ws, message)
@@ -132,6 +145,23 @@ class EEGServer:
                     "type": "recording_saved",
                     "filepath": str(filepath),
                     "label": self._recording_label,
+                }))
+        elif action == "enable_zuna":
+            enabled = cmd.get("enabled", True)
+            stage = self._get_zuna_stage()
+            if stage:
+                stage.enabled = enabled
+                log.info("ZUNA %s", "enabled" if enabled else "disabled")
+                await self._broadcast_text(json.dumps({
+                    "type": "zuna_status",
+                    "available": True,
+                    "enabled": enabled,
+                }))
+            else:
+                await self._broadcast_text(json.dumps({
+                    "type": "zuna_status",
+                    "available": False,
+                    "enabled": False,
                 }))
         elif action == "discard_last_recording":
             path = getattr(self, '_last_saved_path', None)
@@ -236,6 +266,13 @@ class EEGServer:
 
         return npz_path
 
+    def _get_zuna_stage(self):
+        """Find ZunaStage in pipeline if it exists."""
+        for stage in self._pipeline.stages:
+            if stage.name == "zuna_stage":
+                return stage
+        return None
+
     async def _broadcast_binary(self, data: bytes):
         if not self.clients:
             return
@@ -293,7 +330,7 @@ class EEGServer:
 
                 # Run FAST stages for event detection
                 fast_frame = PipelineFrame(
-                    eeg=eeg, ppg=None, imu=None,
+                    eeg=eeg, ppg=None, imu=self._latest_imu,
                     timestamp=time.time(),
                 )
                 self._pipeline.run(Cadence.FAST, fast_frame)
@@ -318,6 +355,7 @@ class EEGServer:
             if self._imu_enabled:
                 imu = self.acq.get_imu_data()
                 if imu is not None and imu.shape[1] > 0:
+                    self._latest_imu = imu
                     self._imu_buffer.append(imu)
                     if self._recording:
                         self._recording_imu.append(imu)
@@ -370,7 +408,10 @@ class EEGServer:
                 eeg=eeg, ppg=ppg, imu=imu,
                 timestamp=time.time(),
             )
-            self._pipeline.run(Cadence.SLOW, frame)
+            # Run in executor to avoid blocking the event loop during
+            # potentially slow stages (e.g. ZUNA GPU inference ~1-5s)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._pipeline.run, Cadence.SLOW, frame)
             metrics = frame_to_metrics(frame)
 
             metrics["session"] = {

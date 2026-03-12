@@ -101,6 +101,7 @@ class BlinkDetector(Stage):
 
     name = "blink_detector"
     cadence = Cadence.FAST
+    _log = logging.getLogger("blink_detector")
 
     # Shape validation buffer: ±200ms at 256Hz
     _HALF_WIN = 51
@@ -109,11 +110,11 @@ class BlinkDetector(Stage):
 
     def __init__(
         self,
-        threshold_uv: float = -75.0,
-        threshold_sd: float = 4.0,
+        threshold_uv: float = -50.0,
+        threshold_sd: float = 3.0,
         baseline_alpha: float = 0.001,
-        refractory_ms: float = 300,
-        classify_window_ms: float = 800,
+        refractory_ms: float = 100,
+        classify_window_ms: float = 600,
         max_hf_ratio: float = 3.5,
         max_deflection_ms: float = 200.0,
         mf_threshold: float = 0,  # disabled: template matching ineffective on 4ch Muse
@@ -280,11 +281,30 @@ class BlinkDetector(Stage):
         min_val = float(np.min(frontal))
         crossed = self._is_candidate(min_val)
 
+        # Debug: log significant deflections even if they don't cross threshold
+        if min_val < -30:
+            sd = max(np.sqrt(self._baseline_var), 1.0) if self._baseline_samples >= 256 else 0
+            adaptive = (self._baseline_mean - self.threshold_sd * sd) if self._baseline_samples >= 256 else None
+            self._log.debug(
+                "deflection %.1f µV | baseline=%.1f sd=%.1f adaptive_thresh=%s fixed_thresh=%.1f | crossed=%s",
+                min_val, self._baseline_mean, sd,
+                f"{adaptive:.1f}" if adaptive is not None else "N/A",
+                self.threshold_uv, crossed,
+            )
+
         if not crossed:
             # Update baseline only during non-event periods
             self._update_baseline(float(np.mean(frontal)))
 
         if crossed:
+            # Guard 0: reject if head is moving (nod/shake causes EEG artifact)
+            if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
+                gyro_pitch_peak = float(np.max(np.abs(frame.imu[4])))
+                gyro_yaw_peak = float(np.max(np.abs(frame.imu[5])))
+                if gyro_pitch_peak > 20.0 or gyro_yaw_peak > 20.0:
+                    self._log.debug("REJECTED by motion guard: pitch=%.1f yaw=%.1f deg/s", gyro_pitch_peak, gyro_yaw_peak)
+                    return
+
             # Guard 1: reject if temporal HF >> frontal HF (jaw clench EMG)
             # Use last 128 samples (~500ms) from buffer for stable HF ratio
             win = min(128, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
@@ -303,40 +323,44 @@ class BlinkDetector(Stage):
                     ])
                 f_hf = _hf_rms(f_win)
                 t_hf = _hf_rms(t_win)
-                if f_hf > 0 and t_hf / f_hf > self.max_hf_ratio:
+                hf_ratio = t_hf / f_hf if f_hf > 0 else 0
+                if f_hf > 0 and hf_ratio > self.max_hf_ratio:
+                    self._log.debug("REJECTED by clench guard: HF ratio=%.2f (max=%.1f)", hf_ratio, self.max_hf_ratio)
                     return
 
             # Guard 2: reject if speech detector flagged active
             speech = frame.get(SpeechResult)
             if speech and speech.speech_active:
+                self._log.debug("REJECTED by speech guard")
                 return
 
             # Guard 3: shape validation — reject broad deflections (speech)
             if not self._check_shape():
+                self._log.debug("REJECTED by shape guard (deflection too broad)")
                 return
 
             # Guard 4: matched filter — reject if template match is poor
             if not self._check_template():
+                self._log.debug("REJECTED by template guard")
                 return
 
             elapsed_ms = (now - self._last_blink_time) * 1000
             if elapsed_ms >= self.refractory_ms:
                 self._last_blink_time = now
                 self._pending_blinks.append(now)
+                self._log.debug("ACCEPTED blink candidate (min=%.1f µV, elapsed=%.0f ms)", min_val, elapsed_ms)
                 if len(self._pending_blinks) == 1:
                     self._classify_deadline = now + self.classify_window_ms / 1000
+            else:
+                self._log.debug("REJECTED by refractory (elapsed=%.0f ms < %.0f ms)", elapsed_ms, self.refractory_ms)
 
         # Emit events once the classification window expires
         if self._pending_blinks and now >= self._classify_deadline:
             count = len(self._pending_blinks)
             self._pending_blinks.clear()
+            self._log.debug("EMITTING: %d blink(s) in window", count)
 
-            if count >= 3:
-                frame.events.append(Event(
-                    kind="triple_blink", timestamp=now, confidence=0.8,
-                    channel="AF7+AF8",
-                ))
-            elif count == 2:
+            if count >= 2:
                 frame.events.append(Event(
                     kind="double_blink", timestamp=now, confidence=0.85,
                     channel="AF7+AF8",
@@ -400,4 +424,91 @@ class ClenchDetector(Stage):
                 kind="clench", timestamp=now, confidence=0.85,
                 channel="TP9+TP10",
                 metadata={"duration_samples": n_above},
+            ))
+
+
+class NodDetector(Stage):
+    """Detect head nods (yes) and shakes (no) from IMU gyroscope data.
+
+    Uses gyro_pitch (ch4) for nod-yes and gyro_yaw (ch5) for head-shake-no.
+    Thresholds derived from 20 nod_yes + 20 nod_no + 10 head_still recordings.
+
+    Gyro pitch: nod_yes median=156 deg/s, nod_no median=19, still max=2.4
+    Gyro yaw:   nod_no  median=176 deg/s, nod_yes median=52, still max=1.3
+    """
+
+    name = "nod_detector"
+    cadence = Cadence.FAST
+
+    # IMU channel indices (BrainFlow Muse 2)
+    GYRO_PITCH = 4  # nod up/down
+    GYRO_YAW = 5    # shake left/right
+
+    def __init__(
+        self,
+        pitch_threshold: float = 40.0,   # deg/s — nod yes (100% TP, 0% FP on training data)
+        yaw_threshold: float = 100.0,    # deg/s — head shake no (100% TP, 0% FP)
+        refractory_ms: float = 1000,     # min time between nod events (nods have down+up = 2 peaks)
+    ):
+        self.pitch_threshold = pitch_threshold
+        self.yaw_threshold = yaw_threshold
+        self.refractory_ms = refractory_ms
+        self._last_nod_time: float = 0.0
+        # Buffer for baseline subtraction (running mean)
+        self._pitch_baseline: float = 0.0
+        self._yaw_baseline: float = 0.0
+        self._baseline_samples: int = 0
+
+    def _update_baseline(self, pitch_mean: float, yaw_mean: float) -> None:
+        self._baseline_samples += 1
+        if self._baseline_samples < 52:  # ~1s cold start
+            alpha = 1.0 / self._baseline_samples
+        else:
+            alpha = 0.01
+        self._pitch_baseline = (1 - alpha) * self._pitch_baseline + alpha * pitch_mean
+        self._yaw_baseline = (1 - alpha) * self._yaw_baseline + alpha * yaw_mean
+
+    def process(self, frame: PipelineFrame) -> None:
+        if frame.imu is None or frame.imu.shape[1] == 0:
+            return
+        if frame.imu.shape[0] <= self.GYRO_YAW:
+            return
+
+        now = frame.timestamp or time.time()
+
+        pitch = frame.imu[self.GYRO_PITCH]
+        yaw = frame.imu[self.GYRO_YAW]
+
+        # Subtract running baseline
+        pitch_centered = pitch - self._pitch_baseline
+        yaw_centered = yaw - self._yaw_baseline
+
+        pitch_peak = float(np.max(np.abs(pitch_centered)))
+        yaw_peak = float(np.max(np.abs(yaw_centered)))
+
+        # Update baseline only during quiet periods
+        if pitch_peak < self.pitch_threshold * 0.5 and yaw_peak < self.yaw_threshold * 0.5:
+            self._update_baseline(float(np.mean(pitch)), float(np.mean(yaw)))
+
+        elapsed_ms = (now - self._last_nod_time) * 1000
+        if elapsed_ms < self.refractory_ms:
+            return
+
+        # Detect nod (pitch dominates yaw)
+        if pitch_peak >= self.pitch_threshold and pitch_peak > yaw_peak:
+            self._last_nod_time = now
+            confidence = min(0.95, 0.7 + 0.25 * (pitch_peak / self.pitch_threshold - 1))
+            frame.events.append(Event(
+                kind="nod_yes", timestamp=now, confidence=round(confidence, 2),
+                channel="gyro_pitch",
+                metadata={"peak_dps": round(pitch_peak, 1)},
+            ))
+        # Detect head shake (yaw dominates pitch)
+        elif yaw_peak >= self.yaw_threshold and yaw_peak > pitch_peak:
+            self._last_nod_time = now
+            confidence = min(0.95, 0.7 + 0.25 * (yaw_peak / self.yaw_threshold - 1))
+            frame.events.append(Event(
+                kind="nod_no", timestamp=now, confidence=round(confidence, 2),
+                channel="gyro_yaw",
+                metadata={"peak_dps": round(yaw_peak, 1)},
             ))

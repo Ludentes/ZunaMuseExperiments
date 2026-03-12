@@ -45,6 +45,7 @@ class BandPowerBroadcaster(Stage):
         n_channels = len(any_band)
 
         # Use ZUNA channel names if we have more than 4 channels
+        # Lazy import to avoid circular dependency (zuna imports from pipeline.base)
         if n_channels > len(self.channel_names):
             from backend.pipeline.stages.zuna import ZUNA_CH_NAMES
             ch_names = ZUNA_CH_NAMES[:n_channels]

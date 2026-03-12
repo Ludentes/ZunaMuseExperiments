@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from backend.pipeline.actions.log import LogAction
 from backend.pipeline.base import Pipeline
-from backend.pipeline.stages.detectors import BlinkDetector, ClenchDetector, SpeechDetector
+from backend.pipeline.stages.detectors import BlinkDetector, ClenchDetector, NodDetector, SpeechDetector
 from backend.pipeline.stages.features import (
     BandPowerExtractor,
     ConcentrationScorer,
@@ -48,6 +48,7 @@ def create_default_pipeline(
         # FAST — event detection (SpeechDetector must precede BlinkDetector)
         SpeechDetector(),
         BlinkDetector(),
+        NodDetector(),
         # ClenchDetector(),  # disabled: needs tuning on real data
     ])
     actions = [

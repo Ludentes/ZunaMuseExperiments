@@ -12,7 +12,8 @@ interface Particle {
 
 const TARGETS: Record<string, { x: number; y: number; color: string }> = {
   double_blink: { x: 85, y: 65, color: "var(--status-info)" },
-  triple_blink: { x: 85, y: 20, color: "var(--status-warn)" },
+  nod_yes: { x: 85, y: 20, color: "var(--status-good)" },
+  nod_no: { x: 85, y: 35, color: "var(--status-bad)" },
 };
 
 const ORIGIN = { x: 30, y: 40 };

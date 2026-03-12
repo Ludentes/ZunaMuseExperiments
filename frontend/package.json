@@ -46,7 +46,7 @@
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "@types/three": "^0.183.1",
+    "@types/three": "0.183.1",
     "@vitejs/plugin-react": "^5.1.4",
     "jsdom": "^28.1.0",
     "typescript": "^5.7.2",
@@ -58,6 +58,9 @@
     "onlyBuiltDependencies": [
       "esbuild",
       "lightningcss"
-    ]
+    ],
+    "overrides": {
+      "@types/three": "0.183.1"
+    }
   }
 }

@@ -541,10 +541,10 @@ export function BrainHeatmap({
   }, []);
 
   return (
-    <div>
+    <div style={{ height, display: "flex", flexDirection: "column" }}>
       {!mounted ? (
         <div style={{
-          height,
+          flex: 1,
           background: "#0a0a0f",
           display: "flex",
           alignItems: "center",
@@ -558,7 +558,7 @@ export function BrainHeatmap({
       ) : (
         <Canvas
           key={_hmrKey}
-          style={{ height, background: "#0a0a0f" }}
+          style={{ flex: 1, background: "#0a0a0f" }}
           camera={{ position: [0, 0.6, 2.2], fov: 42 }}
         >
           <BrainScene
