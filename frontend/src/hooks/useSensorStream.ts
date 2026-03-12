@@ -1,10 +1,11 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";
 import {
   MSG_EEG, MSG_PPG,
   EEG_CHANNELS, PPG_CHANNELS,
   decodeBinaryFrame,
   getChannel,
+  type BciEvent,
 } from "../lib/protocol";
 import { RingBuffer } from "../lib/ringBuffer";
 
@@ -19,6 +20,11 @@ export interface SensorBuffers {
   ppg: RingBuffer[];    // 3 channels (IR, Red, Ambient)
 }
 
+export interface ZunaStatus {
+  available: boolean;
+  enabled: boolean;
+}
+
 export function useSensorStream() {
   const buffersRef = useRef<SensorBuffers>({
     eeg: Array.from({ length: EEG_CHANNELS }, () => new RingBuffer(EEG_BUFFER_SIZE)),
@@ -26,6 +32,8 @@ export function useSensorStream() {
   });
 
   const metricsRef = useRef<string | null>(null);
+  const eventsRef = useRef<BciEvent[]>([]);
+  const [zunaStatus, setZunaStatus] = useState<ZunaStatus>({ available: false, enabled: false });
 
   const { readyState, sendJsonMessage } = useWebSocket(WS_URL, {
     onMessage: (event) => {
@@ -47,8 +55,19 @@ export function useSensorStream() {
           // IMU: not buffered for waveform, only used via metrics JSON
         });
       } else {
-        // JSON frame (metrics)
-        metricsRef.current = event.data;
+        // JSON frame — check for zuna_status or metrics
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "zuna_status") {
+            setZunaStatus({ available: msg.available, enabled: msg.enabled });
+          } else if (msg.type === "bci_event") {
+            eventsRef.current = [...eventsRef.current.slice(-49), msg as BciEvent];
+          } else {
+            metricsRef.current = event.data;
+          }
+        } catch {
+          metricsRef.current = event.data;
+        }
       }
     },
     shouldReconnect: () => true,
@@ -65,8 +84,10 @@ export function useSensorStream() {
   return {
     buffers: buffersRef,
     metricsRef,
+    eventsRef,
     readyState,
     isConnected: readyState === ReadyState.OPEN,
     sendCommand,
+    zunaStatus,
   };
 }

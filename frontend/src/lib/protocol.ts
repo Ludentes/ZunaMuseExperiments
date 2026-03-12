@@ -77,3 +77,11 @@ export interface Metrics {
     duration_sec: number;
   };
 }
+
+export interface BciEvent {
+  type: "bci_event";
+  kind: string;       // "single_blink" | "double_blink" | "triple_blink" | "clench"
+  confidence: number;
+  timestamp: number;
+  channel?: string;
+}
