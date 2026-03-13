@@ -408,7 +408,7 @@ class BlinkDetector(Stage):
         # current baseline. This tracks slow drift while ignoring blink spikes.
         # During blinks: chunk mean is very deviant → outside 3 SDs → no update.
         # During drift: chunk mean shifts gradually → within 3 SDs → updates.
-        chunk_mean = float(np.mean(frontal))
+        chunk_mean = chunk_val
         n_samp = len(frontal)
         if self._baseline_samples < 256:
             # During cold start, still reject extreme outliers once we have
@@ -436,7 +436,6 @@ class BlinkDetector(Stage):
                 min_chunks = max(2, int(self.min_deflection_ms / 1000 * 256 / max(len(frontal), 1)))
                 if streak >= min_chunks:
                     self._try_emit_blink(frame, now)
-            self._consecutive_crossed = 0
 
         # Emit events once the classification window expires
         if self._pending_blinks and now >= self._classify_deadline:
