@@ -1,9 +1,10 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useSensorStream } from "../hooks/useSensorStream";
 import { useMetrics } from "../hooks/useMetrics";
 import { useBandPowers, type BandName } from "../hooks/useBandPowers";
 import { useEvents } from "../hooks/useEvents";
+import { useKioskMqtt } from "../hooks/useKioskMqtt";
 import { BrainHeatmap } from "../components/BrainHeatmap";
 import { BandSelector } from "../components/BandSelector";
 import { CompactFit } from "../components/demo/CompactFit";
@@ -13,6 +14,7 @@ import { CommandArrow } from "../components/demo/CommandArrow";
 import { EEGStrip } from "../components/demo/EEGStrip";
 import { EventLog } from "../components/demo/EventLog";
 import { KioskPlayer } from "../components/demo/KioskPlayer";
+import { KioskToggle } from "../components/demo/KioskToggle";
 import { concentrationToHex } from "../lib/concentrationColor";
 
 export const Route = createFileRoute("/demo")({
@@ -25,6 +27,20 @@ function DemoPage() {
   const { getBandPowers } = useBandPowers(metrics);
   const { events, lastEvent } = useEvents(eventsRef);
   const [selectedBand, setSelectedBand] = useState<BandName>("focus");
+  const [kioskEnabled, setKioskEnabled] = useState(false);
+  const { connected: kioskConnected, sendPlayback } = useKioskMqtt(kioskEnabled);
+
+  // Forward BCI events to real kiosk
+  const lastSentRef = useRef<number>(0);
+  useEffect(() => {
+    if (!lastEvent || !kioskConnected) return;
+    if (lastEvent.timestamp === lastSentRef.current) return;
+    lastSentRef.current = lastEvent.timestamp;
+
+    if (lastEvent.kind === "double_blink") sendPlayback("next");
+    else if (lastEvent.kind === "nod_yes") sendPlayback("play");
+    else if (lastEvent.kind === "nod_no") sendPlayback("pause");
+  }, [lastEvent, kioskConnected, sendPlayback]);
 
   // Derive light state from concentration
   const concentration = metrics?.brain?.concentration ?? 0.5;
@@ -66,6 +82,11 @@ function DemoPage() {
           EUTERPE
         </span>
         <div className="flex items-center gap-4">
+          <KioskToggle
+            enabled={kioskEnabled}
+            connected={kioskConnected}
+            onToggle={setKioskEnabled}
+          />
           <CompactFit
             signalQuality={metrics?.eeg?.signal_quality}
             headbandState={metrics?.headband}
