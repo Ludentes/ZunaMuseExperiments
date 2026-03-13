@@ -10,6 +10,51 @@ from backend.pipeline.stages.detectors import (
 )
 
 
+def _establish_baseline(detector: BlinkDetector, rng, signal_mean: float = 0.0,
+                        signal_sd: float = 10.0, duration_s: float = 1.5) -> float:
+    """Feed quiet data to establish baseline. Returns the timestamp after baseline."""
+    sr = 256
+    chunk_size = 4
+    t = 0.0
+    for _ in range(int(duration_s * sr / chunk_size)):
+        chunk = rng.normal(signal_mean, signal_sd, (4, chunk_size)).astype(np.float64)
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        detector.process(frame)
+        t += chunk_size / sr
+    return t
+
+
+def _inject_blink(detector: BlinkDetector, rng, t: float, signal_mean: float = 0.0,
+                   blink_amp: float = -200.0, blink_samples: int = 20,
+                   total_samples: int = 64) -> tuple[list, float]:
+    """Inject a blink as 4-sample streaming chunks. Returns (events, new_t)."""
+    sr = 256
+    chunk_size = 4
+    blink_eeg = rng.normal(signal_mean, 10, (4, total_samples)).astype(np.float64)
+    blink_start = (total_samples - blink_samples) // 2
+    blink_eeg[1, blink_start:blink_start + blink_samples] = blink_amp
+    blink_eeg[2, blink_start:blink_start + blink_samples] = blink_amp
+
+    all_events = []
+    for start in range(0, total_samples, chunk_size):
+        end = min(start + chunk_size, total_samples)
+        chunk = blink_eeg[:, start:end]
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        detector.process(frame)
+        all_events.extend(frame.events)
+        t += chunk_size / sr
+    return all_events, t
+
+
+def _flush_classify(detector: BlinkDetector, rng, t: float,
+                    signal_mean: float = 0.0) -> list:
+    """Send a calm frame after classify window to flush pending blinks."""
+    calm = rng.normal(signal_mean, 10, (4, 4)).astype(np.float64)
+    frame = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=t + 2.0)
+    detector.process(frame)
+    return list(frame.events)
+
+
 # ── SpeechDetector ──────────────────────────────────────────
 
 
@@ -56,9 +101,12 @@ def test_speech_detector_skips_none():
 def test_blink_detector_no_blink_in_noise():
     """Low-amplitude noise should not trigger blink detection."""
     rng = np.random.default_rng(42)
-    eeg = rng.standard_normal((4, 64)).astype(np.float64) * 20  # ±20 µV noise
-    frame = PipelineFrame(eeg=eeg, ppg=None, imu=None, timestamp=time.time())
     detector = BlinkDetector()
+    t = _establish_baseline(detector, rng, signal_mean=0.0, signal_sd=20.0)
+
+    # More calm noise
+    calm = rng.standard_normal((4, 64)).astype(np.float64) * 20
+    frame = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=t)
     detector.process(frame)
     blink_events = [e for e in frame.events if "blink" in e.kind]
     assert len(blink_events) == 0
@@ -67,24 +115,13 @@ def test_blink_detector_no_blink_in_noise():
 def test_blink_detector_detects_negative_deflection():
     """A -200 µV deflection on AF7+AF8 should trigger a single blink."""
     rng = np.random.default_rng(42)
-    eeg = rng.standard_normal((4, 256)).astype(np.float64) * 10  # ±10 µV background
-    # Insert blink: large negative deflection on frontal channels
-    eeg[1, 125:131] = -200.0
-    eeg[2, 125:131] = -200.0
-
-    now = time.time()
     detector = BlinkDetector(classify_window_ms=100, mf_threshold=0)
 
-    # Frame with the blink — records pending blink
-    frame1 = PipelineFrame(eeg=eeg, ppg=None, imu=None, timestamp=now)
-    detector.process(frame1)
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
+    events1, t = _inject_blink(detector, rng, t, signal_mean=0.0, blink_amp=-200.0)
+    events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
-    # Frame after classify window expires — emits event
-    calm_eeg = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame2 = PipelineFrame(eeg=calm_eeg, ppg=None, imu=None, timestamp=now + 0.2)
-    detector.process(frame2)
-
-    all_events = frame1.events + frame2.events
+    all_events = events1 + events2
     blink_events = [e for e in all_events if "blink" in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "single_blink"
@@ -93,29 +130,25 @@ def test_blink_detector_detects_negative_deflection():
 def test_blink_detector_double_blink():
     """Two blinks within classify window → double_blink event."""
     rng = np.random.default_rng(42)
-    now = time.time()
     detector = BlinkDetector(refractory_ms=200, classify_window_ms=800, mf_threshold=0)
 
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
+
     # First blink
-    eeg1 = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    eeg1[1, 30:35] = -200.0
-    eeg1[2, 30:35] = -200.0
-    frame1 = PipelineFrame(eeg=eeg1, ppg=None, imu=None, timestamp=now)
-    detector.process(frame1)
+    events1, t = _inject_blink(detector, rng, t, signal_mean=0.0)
+    # Gap between blinks
+    for _ in range(int(0.3 * 256 / 4)):
+        chunk = rng.normal(0, 10, (4, 4)).astype(np.float64)
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        detector.process(frame)
+        events1.extend(frame.events)
+        t += 4 / 256
 
-    # Second blink after refractory
-    eeg2 = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    eeg2[1, 30:35] = -200.0
-    eeg2[2, 30:35] = -200.0
-    frame2 = PipelineFrame(eeg=eeg2, ppg=None, imu=None, timestamp=now + 0.4)
-    detector.process(frame2)
+    # Second blink
+    events2, t = _inject_blink(detector, rng, t, signal_mean=0.0)
+    events3 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
-    # After classify window
-    calm = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame3 = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=now + 1.0)
-    detector.process(frame3)
-
-    all_events = frame1.events + frame2.events + frame3.events
+    all_events = events1 + events2 + events3
     blink_events = [e for e in all_events if "blink" in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "double_blink"
@@ -124,29 +157,25 @@ def test_blink_detector_double_blink():
 def test_blink_detector_refractory_prevents_double_count():
     """Two blinks within refractory period should count as one."""
     rng = np.random.default_rng(42)
-    now = time.time()
     detector = BlinkDetector(refractory_ms=300, classify_window_ms=100, mf_threshold=0)
 
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
+
     # First blink
-    eeg1 = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    eeg1[1, 30:35] = -200.0
-    eeg1[2, 30:35] = -200.0
-    frame1 = PipelineFrame(eeg=eeg1, ppg=None, imu=None, timestamp=now)
-    detector.process(frame1)
+    events1, t = _inject_blink(detector, rng, t, signal_mean=0.0)
+    # Very short gap (50ms < 300ms refractory)
+    for _ in range(int(0.05 * 256 / 4)):
+        chunk = rng.normal(0, 10, (4, 4)).astype(np.float64)
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        detector.process(frame)
+        events1.extend(frame.events)
+        t += 4 / 256
 
-    # Second blink within refractory (100ms < 300ms)
-    eeg2 = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    eeg2[1, 30:35] = -200.0
-    eeg2[2, 30:35] = -200.0
-    frame2 = PipelineFrame(eeg=eeg2, ppg=None, imu=None, timestamp=now + 0.1)
-    detector.process(frame2)
+    # Second blink within refractory
+    events2, t = _inject_blink(detector, rng, t, signal_mean=0.0)
+    events3 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
-    # After classify window
-    calm = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame3 = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=now + 0.3)
-    detector.process(frame3)
-
-    all_events = frame1.events + frame2.events + frame3.events
+    all_events = events1 + events2 + events3
     blink_events = [e for e in all_events if "blink" in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "single_blink"
@@ -155,55 +184,43 @@ def test_blink_detector_refractory_prevents_double_count():
 def test_blink_detector_suppressed_by_speech():
     """Blink-like deflection during speech should be suppressed."""
     rng = np.random.default_rng(42)
-    eeg = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    eeg[1, 30:35] = -200.0
-    eeg[2, 30:35] = -200.0
-
-    now = time.time()
-    frame = PipelineFrame(eeg=eeg, ppg=None, imu=None, timestamp=now)
-    # Simulate speech detector having set speech_active
-    frame.set(SpeechResult(speech_active=True))
-
     detector = BlinkDetector(classify_window_ms=100, mf_threshold=0)
-    detector.process(frame)
 
-    # After classify window
-    calm = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame2 = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=now + 0.2)
-    detector.process(frame2)
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
 
-    all_events = frame.events + frame2.events
+    # Inject blink with speech active on every frame
+    blink_eeg = rng.normal(0, 10, (4, 64)).astype(np.float64)
+    blink_eeg[1, 20:40] = -200.0
+    blink_eeg[2, 20:40] = -200.0
+
+    all_events = []
+    for start in range(0, 64, 4):
+        end = min(start + 4, 64)
+        chunk = blink_eeg[:, start:end]
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        frame.set(SpeechResult(speech_active=True))
+        detector.process(frame)
+        all_events.extend(frame.events)
+        t += 4 / 256
+
+    events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
+    all_events.extend(events2)
+
     assert len([e for e in all_events if "blink" in e.kind]) == 0
 
 
 def test_blink_detector_adaptive_threshold():
     """After baseline is established, adaptive threshold should work."""
     rng = np.random.default_rng(42)
-    now = time.time()
     detector = BlinkDetector(threshold_sd=4.0, classify_window_ms=100, mf_threshold=0)
 
-    # Feed ~2s of calm baseline data to establish baseline
-    for i in range(128):  # 128 chunks × 4 samples = 512 samples > 256 needed
-        calm = rng.standard_normal((4, 4)).astype(np.float64) * 10
-        frame = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=now + i * 0.016)
-        detector.process(frame)
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
+    assert detector._baseline_samples >= 256
 
-    assert detector._baseline_samples >= 128
+    events1, t = _inject_blink(detector, rng, t, signal_mean=0.0, blink_amp=-200.0)
+    events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
-    # A large deflection should still be detected
-    blink_eeg = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    blink_eeg[1, 30:35] = -200.0
-    blink_eeg[2, 30:35] = -200.0
-    t_blink = now + 3.0
-    frame_blink = PipelineFrame(eeg=blink_eeg, ppg=None, imu=None, timestamp=t_blink)
-    detector.process(frame_blink)
-
-    # After classify window
-    calm = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame_after = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=t_blink + 0.2)
-    detector.process(frame_after)
-
-    all_events = frame_blink.events + frame_after.events
+    all_events = events1 + events2
     blink_events = [e for e in all_events if "blink" in e.kind]
     assert len(blink_events) >= 1
 
@@ -211,30 +228,28 @@ def test_blink_detector_adaptive_threshold():
 def test_blink_detector_rejects_broad_deflection():
     """A broad, slow deflection (speech-like) should be rejected by shape guard."""
     rng = np.random.default_rng(42)
-    now = time.time()
     detector = BlinkDetector(classify_window_ms=100, max_deflection_ms=200)
 
-    # Feed baseline
-    for i in range(128):
-        calm = rng.standard_normal((4, 4)).astype(np.float64) * 10
-        frame = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=now + i * 0.016)
-        detector.process(frame)
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
 
     # Create a broad deflection: 300ms below threshold (speech-like)
-    broad = rng.standard_normal((4, 256)).astype(np.float64) * 10
-    # Broad, sustained negative on frontal — 77 samples = 300ms at 256Hz
-    broad[1, 50:127] = -120.0
-    broad[2, 50:127] = -120.0
-    t_broad = now + 3.0
-    frame_broad = PipelineFrame(eeg=broad, ppg=None, imu=None, timestamp=t_broad)
-    detector.process(frame_broad)
+    # 77 samples = ~300ms at 256Hz
+    broad = rng.normal(0, 10, (4, 128)).astype(np.float64)
+    broad[1, 20:97] = -120.0
+    broad[2, 20:97] = -120.0
 
-    # After classify window
-    calm = rng.standard_normal((4, 64)).astype(np.float64) * 10
-    frame_after = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=t_broad + 0.2)
-    detector.process(frame_after)
+    all_events = []
+    for start in range(0, 128, 4):
+        end = min(start + 4, 128)
+        chunk = broad[:, start:end]
+        frame = PipelineFrame(eeg=chunk, ppg=None, imu=None, timestamp=t)
+        detector.process(frame)
+        all_events.extend(frame.events)
+        t += 4 / 256
 
-    all_events = frame_broad.events + frame_after.events
+    events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
+    all_events.extend(events2)
+
     blink_events = [e for e in all_events if "blink" in e.kind]
     assert len(blink_events) == 0
 

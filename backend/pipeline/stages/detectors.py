@@ -112,7 +112,7 @@ class BlinkDetector(Stage):
         self,
         threshold_uv: float = -50.0,
         threshold_sd: float = 2.0,
-        baseline_alpha: float = 0.001,
+        baseline_alpha: float = 0.01,
         refractory_ms: float = 100,
         classify_window_ms: float = 600,
         max_hf_ratio: float = 3.5,
@@ -158,12 +158,17 @@ class BlinkDetector(Stage):
         # Sustained deflection counter: real blinks cross threshold for multiple consecutive chunks
         self._consecutive_crossed: int = 0
 
-    def _update_baseline(self, chunk_mean: float) -> None:
-        """Update running baseline with EMA. Only during non-event periods."""
+    def _update_baseline(self, chunk_mean: float, n_samples: int = 1) -> None:
+        """Update running baseline with EMA.
+
+        Args:
+            chunk_mean: Mean of the current chunk's frontal signal.
+            n_samples: Number of samples in this chunk (for cold start counting).
+        """
+        self._baseline_samples += n_samples
         if self._baseline_samples < 256:
-            # Cold start: simple accumulation for first ~1s
-            self._baseline_samples += 1
-            alpha = 1.0 / self._baseline_samples
+            # Cold start: simple accumulation for first ~1s (256 samples at 256Hz)
+            alpha = min(1.0, n_samples / self._baseline_samples)
         else:
             alpha = self.baseline_alpha
         self._baseline_mean = (1 - alpha) * self._baseline_mean + alpha * chunk_mean
@@ -171,18 +176,17 @@ class BlinkDetector(Stage):
         self._baseline_var = (1 - alpha) * self._baseline_var + alpha * diff2
 
     def _is_candidate(self, min_val: float) -> bool:
-        """Check if min_val exceeds adaptive or fixed threshold.
+        """Check if min_val exceeds adaptive threshold.
 
-        Once adaptive baseline is established (~1s), use ONLY adaptive.
-        Fixed threshold is only used during cold start.
+        Suppresses detection during cold start (first 256 samples ~1s) while
+        baseline is being established. This prevents FPs from uninitialized
+        baseline.
         """
-        if self._baseline_samples >= 256:
-            # Adaptive: threshold_sd SDs below running baseline
-            sd = max(np.sqrt(self._baseline_var), 1.0)
-            adaptive_thresh = self._baseline_mean - self.threshold_sd * sd
-            return min_val < adaptive_thresh
-        # Cold start: use fixed threshold until baseline is ready
-        return min_val < self.threshold_uv
+        if self._baseline_samples < 256:
+            return False  # cold start: accumulate baseline, don't detect
+        sd = max(np.sqrt(self._baseline_var), 1.0)
+        adaptive_thresh = self._baseline_mean - self.threshold_sd * sd
+        return min_val < adaptive_thresh
 
     def _append_buffer(self, frontal: np.ndarray, temporal: np.ndarray,
                        af7: np.ndarray, af8: np.ndarray) -> None:
@@ -287,6 +291,90 @@ class BlinkDetector(Stage):
         filtered = np.convolve(buf, self._matched_filt, mode="same")
         return float(np.min(filtered)) < self.mf_threshold
 
+    def _try_emit_blink(self, frame: PipelineFrame, now: float) -> None:
+        """Run guard layers and potentially register a blink candidate.
+
+        Called on the trailing edge of a threshold-crossing streak, after
+        the full blink waveform has been buffered.
+        """
+        # Guard 0: reject if head is moving (nod/shake causes EEG artifact)
+        if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
+            gyro_pitch_peak = float(np.max(np.abs(frame.imu[4])))
+            gyro_yaw_peak = float(np.max(np.abs(frame.imu[5])))
+            if gyro_pitch_peak > 20.0 or gyro_yaw_peak > 20.0:
+                self._log.debug("REJECTED by motion guard: pitch=%.1f yaw=%.1f deg/s", gyro_pitch_peak, gyro_yaw_peak)
+                return
+
+        # Guard 0.5: bilateral correlation — real blinks correlate AF7↔AF8
+        if self.min_bilateral_corr > 0:
+            win = min(64, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
+            if win >= 16:
+                if self._buf_pos >= win:
+                    a7 = self._af7_buf[self._buf_pos - win:self._buf_pos]
+                    a8 = self._af8_buf[self._buf_pos - win:self._buf_pos]
+                else:
+                    a7 = np.concatenate([
+                        self._af7_buf[-(win - self._buf_pos):],
+                        self._af7_buf[:self._buf_pos],
+                    ])
+                    a8 = np.concatenate([
+                        self._af8_buf[-(win - self._buf_pos):],
+                        self._af8_buf[:self._buf_pos],
+                    ])
+                corr = np.corrcoef(a7, a8)[0, 1]
+                if np.isnan(corr) or corr < self.min_bilateral_corr:
+                    self._log.debug("REJECTED by bilateral guard: corr=%.2f (min=%.1f)",
+                                   corr if not np.isnan(corr) else 0, self.min_bilateral_corr)
+                    return
+
+        # Guard 1: reject if temporal HF >> frontal HF (jaw clench EMG)
+        win = min(128, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
+        if win >= 4:
+            if self._buf_pos >= win:
+                f_win = self._frontal_buf[self._buf_pos - win:self._buf_pos]
+                t_win = self._temporal_buf[self._buf_pos - win:self._buf_pos]
+            else:
+                f_win = np.concatenate([
+                    self._frontal_buf[-(win - self._buf_pos):],
+                    self._frontal_buf[:self._buf_pos],
+                ])
+                t_win = np.concatenate([
+                    self._temporal_buf[-(win - self._buf_pos):],
+                    self._temporal_buf[:self._buf_pos],
+                ])
+            f_hf = _hf_rms(f_win)
+            t_hf = _hf_rms(t_win)
+            hf_ratio = t_hf / f_hf if f_hf > 0 else 0
+            if f_hf > 0 and hf_ratio > self.max_hf_ratio:
+                self._log.debug("REJECTED by clench guard: HF ratio=%.2f (max=%.1f)", hf_ratio, self.max_hf_ratio)
+                return
+
+        # Guard 2: reject if speech detector flagged active
+        speech = frame.get(SpeechResult)
+        if speech and speech.speech_active:
+            self._log.debug("REJECTED by speech guard")
+            return
+
+        # Guard 3: shape validation — reject broad deflections (speech)
+        if not self._check_shape():
+            self._log.debug("REJECTED by shape guard (deflection too broad)")
+            return
+
+        # Guard 4: matched filter — reject if template match is poor
+        if not self._check_template():
+            self._log.debug("REJECTED by template guard")
+            return
+
+        elapsed_ms = (now - self._last_blink_time) * 1000
+        if elapsed_ms >= self.refractory_ms:
+            self._last_blink_time = now
+            self._pending_blinks.append(now)
+            self._log.debug("ACCEPTED blink candidate (elapsed=%.0f ms)", elapsed_ms)
+            if len(self._pending_blinks) == 1:
+                self._classify_deadline = now + self.classify_window_ms / 1000
+        else:
+            self._log.debug("REJECTED by refractory (elapsed=%.0f ms < %.0f ms)", elapsed_ms, self.refractory_ms)
+
     def process(self, frame: PipelineFrame) -> None:
         if frame.eeg is None or frame.eeg.shape[1] == 0:
             return
@@ -302,112 +390,53 @@ class BlinkDetector(Stage):
         # Update rolling buffers
         self._append_buffer(frontal, temporal, af7, af8)
 
-        min_val = float(np.min(frontal))
-        crossed = self._is_candidate(min_val)
+        chunk_val = float(np.mean(frontal))
+        crossed = self._is_candidate(chunk_val)
 
         # Debug: log significant deflections even if they don't cross threshold
-        if min_val < -30:
+        if chunk_val < -40:
             sd = max(np.sqrt(self._baseline_var), 1.0) if self._baseline_samples >= 256 else 0
             adaptive = (self._baseline_mean - self.threshold_sd * sd) if self._baseline_samples >= 256 else None
             self._log.debug(
-                "deflection %.1f µV | baseline=%.1f sd=%.1f adaptive_thresh=%s fixed_thresh=%.1f | crossed=%s",
-                min_val, self._baseline_mean, sd,
+                "deflection %.1f µV | baseline=%.1f sd=%.1f adaptive_thresh=%s | crossed=%s",
+                chunk_val, self._baseline_mean, sd,
                 f"{adaptive:.1f}" if adaptive is not None else "N/A",
-                self.threshold_uv, crossed,
+                crossed,
             )
 
-        if not crossed:
-            # Update baseline only during non-event periods
-            self._update_baseline(float(np.mean(frontal)))
-            self._consecutive_crossed = 0
+        # Always update baseline using chunk MEAN (not min) if it's close to
+        # current baseline. This tracks slow drift while ignoring blink spikes.
+        # During blinks: chunk mean is very deviant → outside 3 SDs → no update.
+        # During drift: chunk mean shifts gradually → within 3 SDs → updates.
+        chunk_mean = float(np.mean(frontal))
+        n_samp = len(frontal)
+        if self._baseline_samples < 256:
+            # During cold start, still reject extreme outliers once we have
+            # enough data to know what "normal" looks like (after 64 samples)
+            if self._baseline_samples < 64:
+                self._update_baseline(chunk_mean, n_samp)
+            else:
+                sd = max(np.sqrt(self._baseline_var), 1.0)
+                if abs(chunk_mean - self._baseline_mean) < 5 * sd:
+                    self._update_baseline(chunk_mean, n_samp)
+        else:
+            sd = max(np.sqrt(self._baseline_var), 1.0)
+            if abs(chunk_mean - self._baseline_mean) < 3 * sd:
+                self._update_baseline(chunk_mean, n_samp)
 
         if crossed:
-            # Track sustained deflection: require multiple consecutive chunks
-            # to distinguish real blinks (span 50ms+) from brief noise spikes (<30ms)
             self._consecutive_crossed += 1
-            min_chunks = max(2, int(self.min_deflection_ms / 1000 * 256 / max(len(frontal), 1)))
-            if self._consecutive_crossed < min_chunks:
-                # Not enough consecutive chunks yet — wait for more
-                return
-
-            # Guard 0: reject if head is moving (nod/shake causes EEG artifact)
-            if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
-                gyro_pitch_peak = float(np.max(np.abs(frame.imu[4])))
-                gyro_yaw_peak = float(np.max(np.abs(frame.imu[5])))
-                if gyro_pitch_peak > 20.0 or gyro_yaw_peak > 20.0:
-                    self._log.debug("REJECTED by motion guard: pitch=%.1f yaw=%.1f deg/s", gyro_pitch_peak, gyro_yaw_peak)
-                    return
-
-            # Guard 0.5: bilateral correlation — real blinks correlate AF7↔AF8
-            if self.min_bilateral_corr > 0:
-                win = min(64, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
-                if win >= 16:
-                    if self._buf_pos >= win:
-                        a7 = self._af7_buf[self._buf_pos - win:self._buf_pos]
-                        a8 = self._af8_buf[self._buf_pos - win:self._buf_pos]
-                    else:
-                        a7 = np.concatenate([
-                            self._af7_buf[-(win - self._buf_pos):],
-                            self._af7_buf[:self._buf_pos],
-                        ])
-                        a8 = np.concatenate([
-                            self._af8_buf[-(win - self._buf_pos):],
-                            self._af8_buf[:self._buf_pos],
-                        ])
-                    corr = np.corrcoef(a7, a8)[0, 1]
-                    if np.isnan(corr) or corr < self.min_bilateral_corr:
-                        self._log.debug("REJECTED by bilateral guard: corr=%.2f (min=%.1f)",
-                                       corr if not np.isnan(corr) else 0, self.min_bilateral_corr)
-                        return
-
-            # Guard 1: reject if temporal HF >> frontal HF (jaw clench EMG)
-            # Use last 128 samples (~500ms) from buffer for stable HF ratio
-            win = min(128, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
-            if win >= 4:
-                if self._buf_pos >= win:
-                    f_win = self._frontal_buf[self._buf_pos - win:self._buf_pos]
-                    t_win = self._temporal_buf[self._buf_pos - win:self._buf_pos]
-                else:
-                    f_win = np.concatenate([
-                        self._frontal_buf[-(win - self._buf_pos):],
-                        self._frontal_buf[:self._buf_pos],
-                    ])
-                    t_win = np.concatenate([
-                        self._temporal_buf[-(win - self._buf_pos):],
-                        self._temporal_buf[:self._buf_pos],
-                    ])
-                f_hf = _hf_rms(f_win)
-                t_hf = _hf_rms(t_win)
-                hf_ratio = t_hf / f_hf if f_hf > 0 else 0
-                if f_hf > 0 and hf_ratio > self.max_hf_ratio:
-                    self._log.debug("REJECTED by clench guard: HF ratio=%.2f (max=%.1f)", hf_ratio, self.max_hf_ratio)
-                    return
-
-            # Guard 2: reject if speech detector flagged active
-            speech = frame.get(SpeechResult)
-            if speech and speech.speech_active:
-                self._log.debug("REJECTED by speech guard")
-                return
-
-            # Guard 3: shape validation — reject broad deflections (speech)
-            if not self._check_shape():
-                self._log.debug("REJECTED by shape guard (deflection too broad)")
-                return
-
-            # Guard 4: matched filter — reject if template match is poor
-            if not self._check_template():
-                self._log.debug("REJECTED by template guard")
-                return
-
-            elapsed_ms = (now - self._last_blink_time) * 1000
-            if elapsed_ms >= self.refractory_ms:
-                self._last_blink_time = now
-                self._pending_blinks.append(now)
-                self._log.debug("ACCEPTED blink candidate (min=%.1f µV, elapsed=%.0f ms)", min_val, elapsed_ms)
-                if len(self._pending_blinks) == 1:
-                    self._classify_deadline = now + self.classify_window_ms / 1000
-            else:
-                self._log.debug("REJECTED by refractory (elapsed=%.0f ms < %.0f ms)", elapsed_ms, self.refractory_ms)
+        else:
+            # Trailing-edge detection: validate when crossing streak ends.
+            # This ensures the full blink waveform is in the buffer before
+            # shape validation runs (which needs complete deflection width).
+            if self._consecutive_crossed > 0:
+                streak = self._consecutive_crossed
+                self._consecutive_crossed = 0
+                min_chunks = max(2, int(self.min_deflection_ms / 1000 * 256 / max(len(frontal), 1)))
+                if streak >= min_chunks:
+                    self._try_emit_blink(frame, now)
+            self._consecutive_crossed = 0
 
         # Emit events once the classification window expires
         if self._pending_blinks and now >= self._classify_deadline:
