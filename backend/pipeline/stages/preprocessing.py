@@ -63,7 +63,8 @@ class WaveletDenoiser(Stage):
         self.decomp_level = decomp_level
 
     def process(self, frame: PipelineFrame) -> None:
-        if frame.eeg is None or frame.eeg.shape[1] < 16:
+        min_samples = 2 ** self.decomp_level * 8  # wavelet filter length * levels
+        if frame.eeg is None or frame.eeg.shape[1] < min_samples:
             return
 
         filtered = frame.eeg.copy().astype(np.float64)

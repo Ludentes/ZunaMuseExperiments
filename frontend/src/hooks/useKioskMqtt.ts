@@ -8,7 +8,7 @@ export interface KioskMqttConfig {
 
 const DEFAULT_CONFIG: KioskMqttConfig = {
   brokerUrl: "ws://192.168.87.102:49001",
-  kioskSlug: "kiosk-1-2",
+  kioskSlug: "kiosk-2-5-lyudi-alrosy",
 };
 
 export function useKioskMqtt(enabled: boolean, config: KioskMqttConfig = DEFAULT_CONFIG) {

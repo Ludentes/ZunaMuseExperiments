@@ -111,13 +111,14 @@ class BlinkDetector(Stage):
     def __init__(
         self,
         threshold_uv: float = -50.0,
-        threshold_sd: float = 3.0,
+        threshold_sd: float = 2.0,
         baseline_alpha: float = 0.001,
         refractory_ms: float = 100,
         classify_window_ms: float = 600,
         max_hf_ratio: float = 3.5,
         max_deflection_ms: float = 200.0,
         mf_threshold: float = 0,  # disabled: template matching ineffective on 4ch Muse
+        min_bilateral_corr: float = 0.5,
     ):
         self.threshold_uv = threshold_uv
         self.threshold_sd = threshold_sd
@@ -127,6 +128,7 @@ class BlinkDetector(Stage):
         self.max_hf_ratio = max_hf_ratio
         self.max_deflection_ms = max_deflection_ms
         self.mf_threshold = mf_threshold
+        self.min_bilateral_corr = min_bilateral_corr
         # Load blink template for matched filter
         self._matched_filt: np.ndarray | None = None
         if self._TEMPLATE_PATH.exists():
@@ -147,6 +149,8 @@ class BlinkDetector(Stage):
         # Rolling buffers for shape validation and HF ratio
         self._frontal_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
         self._temporal_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
+        self._af7_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
+        self._af8_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
         self._buf_pos: int = 0
         self._buf_filled: bool = False
 
@@ -163,23 +167,28 @@ class BlinkDetector(Stage):
         self._baseline_var = (1 - alpha) * self._baseline_var + alpha * diff2
 
     def _is_candidate(self, min_val: float) -> bool:
-        """Check if min_val exceeds adaptive or fixed threshold."""
-        # Fixed threshold always applies
-        if min_val >= self.threshold_uv:
-            return False
-        # Adaptive threshold: must be threshold_sd SDs below baseline
+        """Check if min_val exceeds adaptive or fixed threshold.
+
+        Once adaptive baseline is established (~1s), use ONLY adaptive.
+        Fixed threshold is only used during cold start.
+        """
         if self._baseline_samples >= 256:
+            # Adaptive: threshold_sd SDs below running baseline
             sd = max(np.sqrt(self._baseline_var), 1.0)
             adaptive_thresh = self._baseline_mean - self.threshold_sd * sd
             return min_val < adaptive_thresh
-        return True  # fixed threshold passed, baseline not ready
+        # Cold start: use fixed threshold until baseline is ready
+        return min_val < self.threshold_uv
 
-    def _append_buffer(self, frontal: np.ndarray, temporal: np.ndarray) -> None:
-        """Append frontal and temporal data to rolling buffers."""
+    def _append_buffer(self, frontal: np.ndarray, temporal: np.ndarray,
+                       af7: np.ndarray, af8: np.ndarray) -> None:
+        """Append frontal, temporal, and per-channel data to rolling buffers."""
         n = len(frontal)
         if n >= self._BUFFER_SIZE:
             self._frontal_buf[:] = frontal[-self._BUFFER_SIZE:]
             self._temporal_buf[:] = temporal[-self._BUFFER_SIZE:]
+            self._af7_buf[:] = af7[-self._BUFFER_SIZE:]
+            self._af8_buf[:] = af8[-self._BUFFER_SIZE:]
             self._buf_pos = 0
             self._buf_filled = True
             return
@@ -187,14 +196,20 @@ class BlinkDetector(Stage):
         if end <= self._BUFFER_SIZE:
             self._frontal_buf[self._buf_pos:end] = frontal
             self._temporal_buf[self._buf_pos:end] = temporal
+            self._af7_buf[self._buf_pos:end] = af7
+            self._af8_buf[self._buf_pos:end] = af8
             self._buf_pos = end
         else:
             first = self._BUFFER_SIZE - self._buf_pos
             self._frontal_buf[self._buf_pos:] = frontal[:first]
             self._temporal_buf[self._buf_pos:] = temporal[:first]
+            self._af7_buf[self._buf_pos:] = af7[:first]
+            self._af8_buf[self._buf_pos:] = af8[:first]
             rem = n - first
             self._frontal_buf[:rem] = frontal[first:]
             self._temporal_buf[:rem] = temporal[first:]
+            self._af7_buf[:rem] = af7[first:]
+            self._af8_buf[:rem] = af8[first:]
             self._buf_pos = rem
             self._buf_filled = True
 
@@ -272,11 +287,13 @@ class BlinkDetector(Stage):
         now = frame.timestamp or time.time()
 
         # Average of AF7 (idx 1) and AF8 (idx 2) — frontal channels
-        frontal = (frame.eeg[1] + frame.eeg[2]) / 2.0
+        af7 = frame.eeg[1].astype(np.float64)
+        af8 = frame.eeg[2].astype(np.float64)
+        frontal = (af7 + af8) / 2.0
         temporal = (frame.eeg[0] + frame.eeg[3]) / 2.0
 
         # Update rolling buffers
-        self._append_buffer(frontal, temporal)
+        self._append_buffer(frontal, temporal, af7, af8)
 
         min_val = float(np.min(frontal))
         crossed = self._is_candidate(min_val)
@@ -304,6 +321,28 @@ class BlinkDetector(Stage):
                 if gyro_pitch_peak > 20.0 or gyro_yaw_peak > 20.0:
                     self._log.debug("REJECTED by motion guard: pitch=%.1f yaw=%.1f deg/s", gyro_pitch_peak, gyro_yaw_peak)
                     return
+
+            # Guard 0.5: bilateral correlation — real blinks correlate AF7↔AF8
+            if self.min_bilateral_corr > 0:
+                win = min(64, self._buf_pos if not self._buf_filled else self._BUFFER_SIZE)
+                if win >= 16:
+                    if self._buf_pos >= win:
+                        a7 = self._af7_buf[self._buf_pos - win:self._buf_pos]
+                        a8 = self._af8_buf[self._buf_pos - win:self._buf_pos]
+                    else:
+                        a7 = np.concatenate([
+                            self._af7_buf[-(win - self._buf_pos):],
+                            self._af7_buf[:self._buf_pos],
+                        ])
+                        a8 = np.concatenate([
+                            self._af8_buf[-(win - self._buf_pos):],
+                            self._af8_buf[:self._buf_pos],
+                        ])
+                    corr = np.corrcoef(a7, a8)[0, 1]
+                    if np.isnan(corr) or corr < self.min_bilateral_corr:
+                        self._log.debug("REJECTED by bilateral guard: corr=%.2f (min=%.1f)",
+                                       corr if not np.isnan(corr) else 0, self.min_bilateral_corr)
+                        return
 
             # Guard 1: reject if temporal HF >> frontal HF (jaw clench EMG)
             # Use last 128 samples (~500ms) from buffer for stable HF ratio
