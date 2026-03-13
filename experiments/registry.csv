@@ -3,3 +3,11 @@ id,name,timestamp,git_sha,tags,best_f1,best_precision,best_recall,best_threshold
 20260309-123847-rest-new-session,rest-new-session,20260309-123847,e0dd8e7,rest,0.95,0.95,0.95,-75,0,1,1
 20260309-124601-blink-new-session,blink-new-session,20260309-124601,e0dd8e7,blink;new-data,0.9455,0.963,0.9286,-75,0,1,1
 20260312-231410-blink-v6-optimized,blink-v6-optimized,20260312-231410,ed231c6,optimized,0.8832,0.8614,0.9062,-50,7,1,6
+20260313-190242-baseline_good,baseline_good,20260313-190242,27ab7ed,pre-advanced,0.7857,0.9167,0.6875,-50,4,1,1
+20260313-190301-baseline_all,baseline_all,20260313-190301,27ab7ed,pre-advanced-all,0.6275,0.9552,0.4672,-50,4,1,1
+20260313-191302-mad-original,mad-original,20260313-191302,27ab7ed,mad,0.7746,0.8701,0.6979,-50,8,1,1
+20260313-191338-mad-all,mad-all,20260313-191338,27ab7ed,mad,0.6444,0.931,0.4927,-50,8,1,1
+20260313-192210-advanced-original,advanced-original,20260313-192210,27ab7ed,advanced,0.4806,0.9394,0.3229,-50,1,0,1
+20260313-192242-advanced-all,advanced-all,20260313-192242,27ab7ed,advanced,0.3765,0.9697,0.2336,-50,1,0,1
+20260313-192843-final-original,final-original,20260313-192843,27ab7ed,final,0.7886,0.8734,0.7188,-50,8,1,1
+20260313-192914-final-all,final-all,20260313-192914,27ab7ed,final,0.6429,0.9247,0.4927,-50,9,1,1

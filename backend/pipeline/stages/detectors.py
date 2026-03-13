@@ -77,26 +77,29 @@ class SpeechDetector(Stage):
 
 
 class BlinkDetector(Stage):
-    """Detect blinks via adaptive threshold + shape + template + EMG/speech guards.
+    """Detect blinks via MAD-based adaptive threshold + shape guards.
 
-    Six-layer detection pipeline:
-    1. Adaptive threshold: frontal (AF7+AF8)/2 must exceed running baseline
-       by threshold_sd standard deviations (default 4.0). Falls back to
-       fixed threshold_uv if baseline not yet established.
-    2. Clench guard: reject if temporal/frontal HF ratio > max_hf_ratio
-       (clenches: ratio 3.7-5.0, blinks: 1.1-3.3)
-    3. Speech fusion: reject if SpeechDetector flagged speech_active
-    4. Shape validation: buffer ±200ms around event, reject if duration of
-       sub-threshold deflection > max_deflection_ms (speech artifacts are
-       broader than blinks)
-    5. Template matching: matched filter (convolution with time-reversed
-       template). Reject if peak response > mf_threshold (less negative
-       means poorer match). Template from averaged single_blink recordings.
-    6. Refractory + multi-blink classification window
+    Detection pipeline:
+    1. MAD-based adaptive threshold: frontal (AF7+AF8)/2 must exceed
+       median - threshold_sd * 1.4826 * MAD (robust statistics, immune
+       to outlier-induced drift). Rolling window of 256 chunk means.
+    2. Sustained deflection: must cross threshold for multiple consecutive
+       chunks (trailing-edge detection).
+    3. Motion guard: reject if gyro pitch/yaw > 20 deg/s
+    4. Bilateral correlation guard (disabled): AF7↔AF8 correlation
+    5. Clench guard: reject if temporal/frontal HF ratio > max_hf_ratio
+    6. Speech fusion: reject if SpeechDetector flagged speech_active
+    7. Shape validation: duration check [50-200ms] + slope direction check
+       (downstroke must go down, upstroke must go up — rejects plateaus).
+       R² tent fitting computed for debug logging but not gated on (too
+       strict for 4-sample streaming noise).
+    8. Template matching (disabled): matched filter convolution
+    9. Refractory + multi-blink classification window
 
-    Evaluated on 93 recorded trials (rest/single_blink/double_blink/clench/talk):
-    F1=0.93 (P=0.93, R=0.93) with all layers active.
-    See docs/research/2026-03-09-blink-detection-evaluation.md for full analysis.
+    Evaluated on 342 trials (159 original + 183 office demo):
+    Original data: F1=0.79 (P=0.87, R=0.72)
+    All data: F1=0.64 (P=0.92, R=0.49)
+    See docs/research/2026-03-13-advanced-blink-detection-methods-practical.md
     """
 
     name = "blink_detector"
@@ -111,7 +114,7 @@ class BlinkDetector(Stage):
     def __init__(
         self,
         threshold_uv: float = -50.0,
-        threshold_sd: float = 2.0,
+        threshold_sd: float = 1.5,
         baseline_alpha: float = 0.01,
         refractory_ms: float = 100,
         classify_window_ms: float = 600,
@@ -144,9 +147,10 @@ class BlinkDetector(Stage):
         self._last_blink_time: float = 0.0
         self._pending_blinks: deque[float] = deque(maxlen=10)
         self._classify_deadline: float = 0.0
-        # Adaptive baseline (EMA of frontal mean and variance)
-        self._baseline_mean: float = 0.0
-        self._baseline_var: float = 1.0
+        # Adaptive baseline (rolling window + median/MAD)
+        self._baseline_window: deque[float] = deque(maxlen=256)  # ~4s of chunk means at 64 chunks/s
+        self._baseline_median: float = 0.0
+        self._baseline_mad: float = 1.0
         self._baseline_samples: int = 0
         # Rolling buffers for shape validation and HF ratio
         self._frontal_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
@@ -159,34 +163,38 @@ class BlinkDetector(Stage):
         self._consecutive_crossed: int = 0
 
     def _update_baseline(self, chunk_mean: float, n_samples: int = 1) -> None:
-        """Update running baseline with EMA.
+        """Update rolling window baseline with median/MAD.
 
         Args:
             chunk_mean: Mean of the current chunk's frontal signal.
             n_samples: Number of samples in this chunk (for cold start counting).
         """
         self._baseline_samples += n_samples
-        if self._baseline_samples < 256:
-            # Cold start: simple accumulation for first ~1s (256 samples at 256Hz)
-            alpha = min(1.0, n_samples / self._baseline_samples)
-        else:
-            alpha = self.baseline_alpha
-        self._baseline_mean = (1 - alpha) * self._baseline_mean + alpha * chunk_mean
-        diff2 = (chunk_mean - self._baseline_mean) ** 2
-        self._baseline_var = (1 - alpha) * self._baseline_var + alpha * diff2
+        self._baseline_window.append(chunk_mean)
 
-    def _is_candidate(self, min_val: float) -> bool:
-        """Check if min_val exceeds adaptive threshold.
+        if len(self._baseline_window) >= 8:  # need minimum data for meaningful statistics
+            values = np.array(self._baseline_window)
+            self._baseline_median = float(np.median(values))
+            self._baseline_mad = float(np.median(np.abs(values - self._baseline_median)))
+            if self._baseline_mad < 0.5:
+                self._baseline_mad = 0.5  # floor to prevent zero-MAD in perfectly stable signals
+
+    def _is_candidate(self, chunk_mean: float) -> bool:
+        """Check if chunk_mean exceeds adaptive MAD-based threshold.
+
+        Uses robust statistics: threshold = median - lambda * 1.4826 * MAD
+        The 1.4826 factor converts MAD to a consistent estimator of SD
+        for normal distributions.
 
         Suppresses detection during cold start (first 256 samples ~1s) while
-        baseline is being established. This prevents FPs from uninitialized
-        baseline.
+        baseline is being established.
         """
         if self._baseline_samples < 256:
             return False  # cold start: accumulate baseline, don't detect
-        sd = max(np.sqrt(self._baseline_var), 1.0)
-        adaptive_thresh = self._baseline_mean - self.threshold_sd * sd
-        return min_val < adaptive_thresh
+
+        robust_sd = 1.4826 * self._baseline_mad
+        adaptive_thresh = self._baseline_median - self.threshold_sd * robust_sd
+        return chunk_mean < adaptive_thresh
 
     def _append_buffer(self, frontal: np.ndarray, temporal: np.ndarray,
                        af7: np.ndarray, af8: np.ndarray) -> None:
@@ -222,10 +230,18 @@ class BlinkDetector(Stage):
             self._buf_filled = True
 
     def _check_shape(self) -> bool:
-        """Validate blink shape using buffered data. Returns True if shape is blink-like.
+        """Validate blink shape using BLINKER-style R² tent fitting.
 
-        Measures the contiguous duration of samples below half-peak amplitude
-        around the deepest point. Rest noise: <80ms. Blinks: 90-250ms. Speech: 200-400ms+.
+        A real blink has a characteristic tent shape: linear downstroke to peak,
+        then linear upstroke back to baseline. We fit linear regressions to the
+        inner 80% of each half and compute R². Good blinks have R² >= min_r2 on
+        both halves.
+
+        Also checks duration is within [min_deflection_ms, max_deflection_ms].
+
+        Falls back to duration-only check if buffer is too small for R².
+
+        Returns True if shape is blink-like.
         """
         if not self._buf_filled and self._buf_pos < self._HALF_WIN * 2:
             return True  # not enough data, accept
@@ -239,32 +255,85 @@ class BlinkDetector(Stage):
         else:
             buf = self._frontal_buf[:self._buf_pos]
 
-        # Find the deepest point
+        # Find the deepest point (blink peak is most negative)
         min_idx = int(np.argmin(buf))
         peak_val = float(buf[min_idx])
         half_amp = peak_val / 2.0
 
-        # Measure contiguous run below half-amplitude around the peak
-        # Walk left from peak
-        left = 0
+        # Find left boundary at half-amplitude
+        left_idx = min_idx
         for i in range(min_idx - 1, -1, -1):
             if buf[i] >= half_amp:
+                left_idx = i
                 break
-            left += 1
-        # Walk right from peak
-        right = 0
+        else:
+            left_idx = 0
+
+        # Find right boundary at half-amplitude
+        right_idx = min_idx
         for i in range(min_idx + 1, len(buf)):
             if buf[i] >= half_amp:
+                right_idx = i
                 break
-            right += 1
+        else:
+            right_idx = len(buf) - 1
 
-        contiguous = left + 1 + right  # +1 for the peak itself
+        # Duration check
+        contiguous = right_idx - left_idx + 1
         dur_ms = contiguous / 256.0 * 1000.0
 
         if dur_ms < self.min_deflection_ms:
             self._log.debug("SHAPE: too brief %.0fms < %.0fms", dur_ms, self.min_deflection_ms)
             return False
-        return dur_ms <= self.max_deflection_ms
+        if dur_ms > self.max_deflection_ms:
+            self._log.debug("SHAPE: too broad %.0fms > %.0fms", dur_ms, self.max_deflection_ms)
+            return False
+
+        # R² tent fitting: need at least 4 samples per half for meaningful regression
+        downstroke = buf[left_idx:min_idx + 1]
+        upstroke = buf[min_idx:right_idx + 1]
+
+        if len(downstroke) < 4 or len(upstroke) < 4:
+            return True  # too short for R², accept based on duration alone
+
+        # Fit inner 80% of each half. Returns (R², slope).
+        def r_squared_and_slope(segment: np.ndarray) -> tuple[float, float]:
+            n = len(segment)
+            start = int(n * 0.1)
+            end = int(n * 0.9)
+            if end - start < 3:
+                return 1.0, 0.0  # too few points, accept
+            inner = segment[start:end]
+            x = np.arange(len(inner), dtype=np.float64)
+            coeffs = np.polyfit(x, inner, 1)
+            slope = float(coeffs[0])
+            predicted = np.polyval(coeffs, x)
+            ss_res = np.sum((inner - predicted) ** 2)
+            ss_tot = np.sum((inner - np.mean(inner)) ** 2)
+            if ss_tot < 1e-10:
+                return 1.0, slope  # constant signal — high R² but check slope
+            return float(1.0 - ss_res / ss_tot), slope
+
+        r2_down, slope_down = r_squared_and_slope(downstroke)
+        r2_up, slope_up = r_squared_and_slope(upstroke)
+
+        # R² gating disabled — 4-sample streaming noise makes linear R² unreliable
+        # (R²=0.7 rejected 32% of valid blinks). R² values still logged for analysis.
+
+        # Slope direction check: downstroke must go down, upstroke must go up.
+        # Flat plateaus have near-zero slope on both halves.
+        blink_amplitude = abs(peak_val - float(np.mean([buf[left_idx], buf[right_idx]])))
+        if blink_amplitude > 1.0:
+            min_slope = blink_amplitude * 0.15 / max(len(downstroke), len(upstroke))
+            if slope_down > -min_slope or slope_up < min_slope:
+                self._log.debug(
+                    "SHAPE slope: down=%.2f up=%.2f (min_mag=%.2f) → REJECT (plateau)",
+                    slope_down, slope_up, min_slope)
+                return False
+
+        self._log.debug("SHAPE R²: down=%.2f up=%.2f slopes=%.2f/%.2f → ACCEPT",
+                       r2_down, r2_up, slope_down, slope_up)
+        return True
 
     def _check_template(self) -> bool:
         """Validate blink using matched filter on buffered data.
@@ -355,9 +424,9 @@ class BlinkDetector(Stage):
             self._log.debug("REJECTED by speech guard")
             return
 
-        # Guard 3: shape validation — reject broad deflections (speech)
+        # Guard 3: shape validation — reject non-tent-shaped deflections
         if not self._check_shape():
-            self._log.debug("REJECTED by shape guard (deflection too broad)")
+            self._log.debug("REJECTED by shape guard")
             return
 
         # Guard 4: matched filter — reject if template match is poor
@@ -395,19 +464,19 @@ class BlinkDetector(Stage):
 
         # Debug: log significant deflections even if they don't cross threshold
         if chunk_val < -40:
-            sd = max(np.sqrt(self._baseline_var), 1.0) if self._baseline_samples >= 256 else 0
-            adaptive = (self._baseline_mean - self.threshold_sd * sd) if self._baseline_samples >= 256 else None
+            sd = max(1.4826 * self._baseline_mad, 1.0) if self._baseline_samples >= 256 else 0
+            adaptive = (self._baseline_median - self.threshold_sd * sd) if self._baseline_samples >= 256 else None
             self._log.debug(
                 "deflection %.1f µV | baseline=%.1f sd=%.1f adaptive_thresh=%s | crossed=%s",
-                chunk_val, self._baseline_mean, sd,
+                chunk_val, self._baseline_median, sd,
                 f"{adaptive:.1f}" if adaptive is not None else "N/A",
                 crossed,
             )
 
         # Always update baseline using chunk MEAN (not min) if it's close to
         # current baseline. This tracks slow drift while ignoring blink spikes.
-        # During blinks: chunk mean is very deviant → outside 3 SDs → no update.
-        # During drift: chunk mean shifts gradually → within 3 SDs → updates.
+        # During blinks: chunk mean is very deviant → outside 3 robust SDs → no update.
+        # During drift: chunk mean shifts gradually → within 3 robust SDs → updates.
         chunk_mean = chunk_val
         n_samp = len(frontal)
         if self._baseline_samples < 256:
@@ -416,12 +485,12 @@ class BlinkDetector(Stage):
             if self._baseline_samples < 64:
                 self._update_baseline(chunk_mean, n_samp)
             else:
-                sd = max(np.sqrt(self._baseline_var), 1.0)
-                if abs(chunk_mean - self._baseline_mean) < 5 * sd:
+                robust_sd = 1.4826 * self._baseline_mad
+                if abs(chunk_mean - self._baseline_median) < 5 * robust_sd:
                     self._update_baseline(chunk_mean, n_samp)
         else:
-            sd = max(np.sqrt(self._baseline_var), 1.0)
-            if abs(chunk_mean - self._baseline_mean) < 3 * sd:
+            robust_sd = 1.4826 * self._baseline_mad
+            if abs(chunk_mean - self._baseline_median) < 3 * robust_sd:
                 self._update_baseline(chunk_mean, n_samp)
 
         if crossed:

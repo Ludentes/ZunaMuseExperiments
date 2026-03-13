@@ -1,0 +1,25 @@
+{
+  "id": "20260313-191302-mad-original",
+  "name": "mad-original",
+  "timestamp": "20260313-191302",
+  "tags": [
+    "mad"
+  ],
+  "git_sha": "27ab7ed",
+  "git_dirty": true,
+  "params": {
+    "threshold_uv": -50,
+    "threshold_sd": 4.0,
+    "max_hf_ratio": 3.5,
+    "hf_window_samples": 128,
+    "max_deflection_ms": 200,
+    "refractory_ms": 300,
+    "classify_window_ms": 800,
+    "n_rest": 30,
+    "n_single": 56,
+    "n_double": 40,
+    "n_clench": 20,
+    "n_talk": 13
+  },
+  "elapsed_s": 0.0
+}

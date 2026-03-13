@@ -24,14 +24,21 @@ from backend.pipeline.stages.detectors import BlinkDetector, SpeechDetector
 from backend.pipeline.types import PipelineFrame
 
 
-def load_trials(label: str) -> list[dict]:
-    """Load all npz trials for a label, including from session subdirs."""
+def load_trials(label: str, exclude_pattern: str | None = None) -> list[dict]:
+    """Load all npz trials for a label, including from session subdirs.
+
+    If exclude_pattern is set, skip files whose path contains the pattern.
+    """
     trials = []
     # Direct files
     for f in sorted(glob.glob(f"recordings/{label}/{label}_t*.npz")):
+        if exclude_pattern and exclude_pattern in f:
+            continue
         trials.append(_load_npz(f))
     # Session subdirectories
     for f in sorted(glob.glob(f"recordings/{label}/*/{label}_t*.npz")):
+        if exclude_pattern and exclude_pattern in f:
+            continue
         trials.append(_load_npz(f))
     return [t for t in trials if t is not None]
 
@@ -185,6 +192,8 @@ def main():
     parser.add_argument("--save", action="store_true", help="Save results to experiments/")
     parser.add_argument("--name", default="blink-detector-eval", help="Experiment name")
     parser.add_argument("--tag", action="append", default=[], help="Tags (repeatable)")
+    parser.add_argument("--exclude-pattern", default=None,
+                        help="Exclude files whose path contains this string (e.g. '20260313')")
     args = parser.parse_args()
 
     # Capture output for artifact saving
@@ -193,12 +202,14 @@ def main():
         print(s)
         output.write(s + "\n")
 
+    if args.exclude_pattern:
+        tee(f"Excluding files matching: {args.exclude_pattern}")
     tee("Loading recorded trials...")
-    rest = load_trials("rest")
-    single = load_trials("single_blink")
-    double = load_trials("double_blink")
-    clench = load_trials("clench")
-    talk = load_trials("talk")
+    rest = load_trials("rest", args.exclude_pattern)
+    single = load_trials("single_blink", args.exclude_pattern)
+    double = load_trials("double_blink", args.exclude_pattern)
+    clench = load_trials("clench", args.exclude_pattern)
+    talk = load_trials("talk", args.exclude_pattern)
     tee(f"  rest={len(rest)}, single_blink={len(single)}, double_blink={len(double)}, "
         f"clench={len(clench)}, talk={len(talk)}")
 
