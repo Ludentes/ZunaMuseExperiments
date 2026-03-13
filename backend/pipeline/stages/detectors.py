@@ -118,7 +118,7 @@ class BlinkDetector(Stage):
         max_hf_ratio: float = 3.5,
         max_deflection_ms: float = 200.0,
         mf_threshold: float = 0,  # disabled: template matching ineffective on 4ch Muse
-        min_bilateral_corr: float = 0.5,
+        min_bilateral_corr: float = 0.0,  # disabled: unreliable with dry electrodes
     ):
         self.threshold_uv = threshold_uv
         self.threshold_sd = threshold_sd
