@@ -116,6 +116,7 @@ class BlinkDetector(Stage):
         refractory_ms: float = 100,
         classify_window_ms: float = 600,
         max_hf_ratio: float = 3.5,
+        min_deflection_ms: float = 50.0,
         max_deflection_ms: float = 200.0,
         mf_threshold: float = 0,  # disabled: template matching ineffective on 4ch Muse
         min_bilateral_corr: float = 0.0,  # disabled: unreliable with dry electrodes
@@ -126,6 +127,7 @@ class BlinkDetector(Stage):
         self.refractory_ms = refractory_ms
         self.classify_window_ms = classify_window_ms
         self.max_hf_ratio = max_hf_ratio
+        self.min_deflection_ms = min_deflection_ms
         self.max_deflection_ms = max_deflection_ms
         self.mf_threshold = mf_threshold
         self.min_bilateral_corr = min_bilateral_corr
@@ -153,6 +155,8 @@ class BlinkDetector(Stage):
         self._af8_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
         self._buf_pos: int = 0
         self._buf_filled: bool = False
+        # Sustained deflection counter: real blinks cross threshold for multiple consecutive chunks
+        self._consecutive_crossed: int = 0
 
     def _update_baseline(self, chunk_mean: float) -> None:
         """Update running baseline with EMA. Only during non-event periods."""
@@ -217,7 +221,7 @@ class BlinkDetector(Stage):
         """Validate blink shape using buffered data. Returns True if shape is blink-like.
 
         Measures the contiguous duration of samples below half-peak amplitude
-        around the deepest point. Blinks: 30-170ms. Speech: 200-300ms+.
+        around the deepest point. Rest noise: <80ms. Blinks: 90-250ms. Speech: 200-400ms+.
         """
         if not self._buf_filled and self._buf_pos < self._HALF_WIN * 2:
             return True  # not enough data, accept
@@ -253,6 +257,9 @@ class BlinkDetector(Stage):
         contiguous = left + 1 + right  # +1 for the peak itself
         dur_ms = contiguous / 256.0 * 1000.0
 
+        if dur_ms < self.min_deflection_ms:
+            self._log.debug("SHAPE: too brief %.0fms < %.0fms", dur_ms, self.min_deflection_ms)
+            return False
         return dur_ms <= self.max_deflection_ms
 
     def _check_template(self) -> bool:
@@ -312,8 +319,17 @@ class BlinkDetector(Stage):
         if not crossed:
             # Update baseline only during non-event periods
             self._update_baseline(float(np.mean(frontal)))
+            self._consecutive_crossed = 0
 
         if crossed:
+            # Track sustained deflection: require multiple consecutive chunks
+            # to distinguish real blinks (span 50ms+) from brief noise spikes (<30ms)
+            self._consecutive_crossed += 1
+            min_chunks = max(2, int(self.min_deflection_ms / 1000 * 256 / max(len(frontal), 1)))
+            if self._consecutive_crossed < min_chunks:
+                # Not enough consecutive chunks yet — wait for more
+                return
+
             # Guard 0: reject if head is moving (nod/shake causes EEG artifact)
             if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
                 gyro_pitch_peak = float(np.max(np.abs(frame.imu[4])))
