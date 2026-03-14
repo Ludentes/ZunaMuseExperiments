@@ -54,6 +54,31 @@ def _replay_eeg(
     return events
 
 
+def _inject_v_blink(eeg: np.ndarray, start: int, baseline_uv: float,
+                     amplitude_uv: float, duration: int = 26) -> None:
+    """Inject a V-shaped blink into frontal channels AF7 (idx 1) and AF8 (idx 2).
+
+    Generates a linear downstroke from baseline to trough, then a linear upstroke
+    back to baseline.  This passes the slope guard that rejects flat plateaus.
+
+    Args:
+        eeg: (4, N) array to modify in-place.
+        start: Sample index where blink starts.
+        baseline_uv: Resting baseline level (µV).
+        amplitude_uv: Peak deflection below baseline (negative µV, e.g. -170).
+        duration: Total blink duration in samples (~100ms at 256Hz = 26 samples).
+    """
+    half = duration // 2
+    trough = baseline_uv + amplitude_uv
+    downstroke = np.linspace(baseline_uv, trough, half)
+    upstroke = np.linspace(trough, baseline_uv, duration - half)
+    envelope = np.concatenate([downstroke, upstroke])
+    end = min(start + duration, eeg.shape[1])
+    n = end - start
+    eeg[1, start:end] = envelope[:n]
+    eeg[2, start:end] = envelope[:n]
+
+
 def _get_longest_baseline() -> str | None:
     """Find the largest baseline .npz file."""
     files = glob.glob("recordings/baseline/**/baseline_t*.npz", recursive=True)
@@ -390,11 +415,9 @@ class TestDetectionAfterDrift:
             detector.process(frame)
             t += chunk_size / sr
 
-        # Inject blink as streaming 4-sample chunks (realistic simulation)
-        blink_samples = 26  # ~100ms at 256Hz
+        # Inject V-shaped blink (realistic: downstroke → trough → upstroke)
         blink_eeg = rng.normal(-30, 10, (4, 64)).astype(np.float64)
-        blink_eeg[1, 20:20 + blink_samples] = -200.0
-        blink_eeg[2, 20:20 + blink_samples] = -200.0
+        _inject_v_blink(blink_eeg, start=20, baseline_uv=-30, amplitude_uv=-170)
 
         all_events = []
         for start in range(0, 64, chunk_size):
@@ -439,10 +462,9 @@ class TestDetectionAfterDrift:
             detector.process(frame)
             t += chunk_size / sr
 
-        # Inject blink in 4-sample streaming chunks
+        # Inject V-shaped blink centred on the drifted baseline
         blink_eeg = rng.normal(-45, 8, (4, 64)).astype(np.float64)
-        blink_eeg[1, 20:46] = -200.0
-        blink_eeg[2, 20:46] = -200.0
+        _inject_v_blink(blink_eeg, start=20, baseline_uv=-45, amplitude_uv=-155)
 
         all_events = []
         for start in range(0, 64, chunk_size):
@@ -488,12 +510,11 @@ class TestDetectionAfterDrift:
             detector.process(frame)
             t += chunk_size / sr
 
-        # Inject blink as 4-sample streaming chunks
+        # Inject V-shaped blink centred on actual session baseline
         actual_mean = detector._baseline_median
         rng = np.random.default_rng(99)
         blink_eeg = rng.normal(actual_mean, 10, (4, 64)).astype(np.float64)
-        blink_eeg[1, 20:46] = actual_mean - 170  # ~170µV below baseline
-        blink_eeg[2, 20:46] = actual_mean - 170
+        _inject_v_blink(blink_eeg, start=20, baseline_uv=actual_mean, amplitude_uv=-170)
 
         all_events = []
         for start in range(0, 64, chunk_size):
@@ -568,10 +589,10 @@ class TestCrossSession:
             detector.process(frame)
             t += chunk_size / sr
 
-        # Inject blink as 4-sample streaming chunks
+        # Inject V-shaped blink: amplitude_uv is the deflection *below* signal_mean
         blink_eeg = rng.normal(signal_mean, 8, (4, 64)).astype(np.float64)
-        blink_eeg[1, 20:46] = blink_amp
-        blink_eeg[2, 20:46] = blink_amp
+        _inject_v_blink(blink_eeg, start=20, baseline_uv=signal_mean,
+                         amplitude_uv=blink_amp - signal_mean)
 
         all_events = []
         for start in range(0, 64, chunk_size):

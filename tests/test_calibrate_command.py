@@ -66,8 +66,8 @@ def test_blink_detector_has_set_signal_quality():
     assert callable(detector.set_signal_quality)
 
 
-def test_calibrate_threshold_changes_threshold_sd():
-    """set_calibrated_threshold should modify threshold_sd after baseline is established."""
+def test_calibrate_threshold_sets_floor():
+    """set_calibrated_threshold sets threshold_uv floor; threshold_sd stays unchanged."""
     rng = np.random.default_rng(42)
     detector = BlinkDetector(threshold_sd=4.0)
 
@@ -81,8 +81,10 @@ def test_calibrate_threshold_changes_threshold_sd():
 
     original_sd = detector.threshold_sd
     detector.set_calibrated_threshold(-80.0)
-    assert detector.threshold_sd != original_sd
-    assert detector.threshold_sd >= 1.5  # floor
+    assert detector.threshold_sd == original_sd, (
+        "threshold_sd must not change — only threshold_uv (floor) is updated by calibration"
+    )
+    assert detector.threshold_uv > -9000, "threshold_uv should be set to half-amplitude floor"
 
 
 def test_set_signal_quality_clamps():

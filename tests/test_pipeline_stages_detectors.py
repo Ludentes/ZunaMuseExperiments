@@ -394,19 +394,20 @@ def test_blink_detector_set_signal_quality_scales_confidence():
 
 
 def test_blink_detector_set_calibrated_threshold():
-    """Calibration adjusts threshold_sd based on measured blink amplitudes."""
+    """Calibration sets threshold_uv floor; threshold_sd stays unchanged."""
     rng = np.random.default_rng(42)
     detector = BlinkDetector(threshold_sd=4.0)
 
     _establish_baseline(detector, rng, signal_mean=0.0)
     original_sd = detector.threshold_sd
 
-    # Calibrate with a median peak amplitude that implies different threshold
+    # Calibrate with a median peak amplitude
     detector.set_calibrated_threshold(median_peak_amplitude_uv=-80.0)
-    new_sd = detector.threshold_sd
 
-    assert new_sd != original_sd, f"Threshold should change after calibration, still {original_sd}"
-    assert new_sd >= 1.5, f"Threshold SD should be >= 1.5 floor, got {new_sd}"
+    assert detector.threshold_sd == original_sd, (
+        f"threshold_sd must stay unchanged after calibration, changed {original_sd} → {detector.threshold_sd}"
+    )
+    assert detector.threshold_uv > -9000, "threshold_uv should be set to half-amplitude floor"
 
 
 def test_blink_detector_skips_none():

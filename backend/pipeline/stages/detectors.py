@@ -157,6 +157,13 @@ class BlinkDetector(Stage):
         self._baseline_median: float = 0.0
         self._baseline_mad: float = 1.0
         self._baseline_samples: int = 0
+        # Per-channel baselines for AF7 and AF8 (independent, for asymmetric blink detection)
+        self._af7_baseline_window: deque[float] = deque(maxlen=256)
+        self._af7_baseline_median: float = 0.0
+        self._af7_baseline_mad: float = 1.0
+        self._af8_baseline_window: deque[float] = deque(maxlen=256)
+        self._af8_baseline_median: float = 0.0
+        self._af8_baseline_mad: float = 1.0
         # Rolling buffers for shape validation and HF ratio
         self._frontal_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
         self._temporal_buf: np.ndarray = np.zeros(self._BUFFER_SIZE)
@@ -189,53 +196,69 @@ class BlinkDetector(Stage):
             if self._baseline_mad < 0.5:
                 self._baseline_mad = 0.5  # floor to prevent zero-MAD in perfectly stable signals
 
+    def _update_channel_baselines(self, af7_mean: float, af8_mean: float) -> None:
+        """Update per-channel rolling baselines with contamination guard.
+
+        Mirrors _update_baseline but tracks AF7 and AF8 independently so
+        the adaptive threshold can fire on whichever channel has better contact.
+        Does NOT increment _baseline_samples (that counter is owned by _update_baseline).
+        """
+        for ch_mean, window, median_attr, mad_attr in (
+            (af7_mean, self._af7_baseline_window, "_af7_baseline_median", "_af7_baseline_mad"),
+            (af8_mean, self._af8_baseline_window, "_af8_baseline_median", "_af8_baseline_mad"),
+        ):
+            ch_median = getattr(self, median_attr)
+            ch_mad = getattr(self, mad_attr)
+            robust_sd = 1.4826 * ch_mad
+            if len(window) < 8 or robust_sd < 1e-6 or abs(ch_mean - ch_median) < 3 * robust_sd:
+                window.append(ch_mean)
+                if len(window) >= 8:
+                    vals = np.array(window)
+                    new_med = float(np.median(vals))
+                    new_mad = max(float(np.median(np.abs(vals - new_med))), 0.5)
+                    setattr(self, median_attr, new_med)
+                    setattr(self, mad_attr, new_mad)
+
     def set_signal_quality(self, frontal_quality: float) -> None:
         """Set frontal signal quality (0-1) to scale blink confidence."""
         self._frontal_quality = max(0.0, min(1.0, frontal_quality))
 
     def set_calibrated_threshold(self, median_peak_amplitude_uv: float) -> None:
-        """Adjust threshold_sd to fire at the half-amplitude of the measured blink peak.
+        """Set a per-session half-amplitude floor from measured blink amplitude.
 
-        Takes the median peak amplitude (most negative point of a blink), and sets
-        threshold_sd so the detector fires at the halfway point between baseline and peak.
-        This gives ~50ms faster response than waiting for the peak itself.
+        Computes the half-amplitude point between the measured blink peak and the
+        current baseline, and stores it as threshold_uv. In the adaptive threshold
+        check, threshold_uv acts as a ceiling that prevents the effective threshold
+        from becoming more negative than the calibrated half-amplitude — so that
+        in noisy sessions with high MAD (where the adaptive alone would require an
+        unreachably deep signal), the calibrated floor still triggers detection.
+
+        Does NOT change threshold_sd, which would hurt recall for stable low-MAD
+        sessions by making the adaptive threshold unnecessarily deep.
 
         Args:
-            median_peak_amplitude_uv: Median peak amplitude from calibration captures (negative µV).
+            median_peak_amplitude_uv: Median peak amplitude from calibration (negative µV).
         """
         robust_sd = 1.4826 * self._baseline_mad
         if robust_sd < 1e-6:
             self._log.warning("Cannot calibrate: robust_sd near zero (baseline not established yet?)")
             return
-        old_thresh_sd = self.threshold_sd
-        old_effective_uv = self._baseline_median - old_thresh_sd * robust_sd
-        # SDs from baseline to peak
-        peak_sds = abs(median_peak_amplitude_uv - self._baseline_median) / robust_sd
-        # Fire at half-amplitude = half the deflection from baseline → half the SDs.
-        # Cap at 3.5 SDs: when MAD is very small (stable signal), peak_sds can be
-        # 10-15+ SDs, making half = 5-7 SDs. A threshold that high misses casual
-        # blinks after calibration (user blinks harder when prompted than naturally).
-        new_threshold = max(1.5, min(peak_sds * 0.5, 3.5))
-        new_effective_uv = self._baseline_median - new_threshold * robust_sd
         half_amp_uv = (median_peak_amplitude_uv + self._baseline_median) / 2.0
+        peak_sds = abs(median_peak_amplitude_uv - self._baseline_median) / robust_sd
+        old_effective_uv = self._baseline_median - self.threshold_sd * robust_sd
         self._log.info(
             "CALIBRATE: peak=%.1f µV is %.1f SDs from baseline (%.1f) | "
-            "half-amplitude target=%.1f µV",
+            "half-amplitude floor=%.1f µV",
             median_peak_amplitude_uv, peak_sds, self._baseline_median, half_amp_uv,
         )
         self._log.info(
-            "CALIBRATE: threshold_sd %.2f → %.2f | effective_thresh %.1f → %.1f µV",
-            old_thresh_sd, new_threshold, old_effective_uv, new_effective_uv,
+            "CALIBRATE: threshold_sd unchanged (%.2f) | "
+            "adaptive_thresh=%.1f µV | threshold_uv floor=%.1f µV",
+            self.threshold_sd, old_effective_uv, half_amp_uv,
         )
-        self._log.info(
-            "CALIBRATE: peak %.1f µV would now %s detection (fires at %.1f µV, half-amp=%.1f µV)",
-            median_peak_amplitude_uv,
-            "TRIGGER" if median_peak_amplitude_uv < new_effective_uv else "MISS",
-            new_effective_uv, half_amp_uv,
-        )
-        self.threshold_sd = new_threshold
-        # Also store the absolute half-amplitude so MAD drift can't raise
-        # the effective threshold above this calibrated point later.
+        # Store half-amplitude as floor: max(adaptive, threshold_uv) picks the less
+        # negative of the two, so threshold_uv only activates when the adaptive
+        # drifts MORE negative (more restrictive) than the calibrated floor.
         self.threshold_uv = half_amp_uv
 
     def set_blink_threshold(self, threshold_sd: float | None = None, threshold_uv: float | None = None) -> None:
@@ -288,7 +311,7 @@ class BlinkDetector(Stage):
             return {"amplitude_uv": 0.0, "half_amplitude_uv": 0.0, "baseline_stable": False}
         samples = self._capture_samples
         peak_val = float(min(samples))
-        baseline_stable = self._baseline_samples >= 256
+        baseline_stable = self._baseline_samples >= 128
         # Half-amplitude relative to baseline (midpoint from baseline to peak).
         # When baseline is not stable, fall back to absolute peak/2 (less accurate).
         if baseline_stable:
@@ -313,32 +336,33 @@ class BlinkDetector(Stage):
             "baseline_stable": baseline_stable,
         }
 
-    def _is_candidate(self, chunk_mean: float) -> bool:
-        """Check if chunk_mean exceeds adaptive MAD-based threshold.
+    def _is_candidate(self, af7_mean: float, af8_mean: float) -> bool:
+        """Check if either frontal channel exceeds its adaptive MAD-based threshold.
 
-        Uses robust statistics: threshold = median - lambda * 1.4826 * MAD
-        The 1.4826 factor converts MAD to a consistent estimator of SD
-        for normal distributions.
+        Uses per-channel robust statistics: threshold = median - lambda * 1.4826 * MAD
+        Fires if AF7 OR AF8 crosses its own per-channel adaptive threshold, so a blink
+        is detected even when only one electrode has good contact.
 
-        Also gates on threshold_uv when set by calibration — whichever is
-        less strict (closer to zero) wins. This prevents MAD drift from raising
-        the effective threshold above the calibrated amplitude over long sessions.
-
-        Suppresses detection during cold start (first 256 samples ~1s) while
+        Suppresses detection during cold start (first 128 samples ~0.5s) while
         baseline is being established.
         """
-        if self._baseline_samples < 256:
+        if self._baseline_samples < 128:
             return False  # cold start: accumulate baseline, don't detect
 
-        robust_sd = 1.4826 * self._baseline_mad
-        adaptive_thresh = self._baseline_median - self.threshold_sd * robust_sd
-        # threshold_uv acts as a calibrated floor: if set (> -9000 sentinel),
-        # pick whichever threshold is less strict (max of two negative values).
-        if self.threshold_uv > -9000:
-            effective_thresh = max(adaptive_thresh, self.threshold_uv)
-        else:
-            effective_thresh = adaptive_thresh
-        return chunk_mean < effective_thresh
+        # Per-channel adaptive check: fire if either channel crosses its threshold
+        def _channel_crossed(mean: float, median: float, mad: float) -> bool:
+            robust_sd = 1.4826 * mad
+            adaptive_thresh = median - self.threshold_sd * robust_sd
+            if self.threshold_uv > -9000:
+                effective_thresh = max(adaptive_thresh, self.threshold_uv)
+            else:
+                effective_thresh = adaptive_thresh
+            return mean < effective_thresh
+
+        return (
+            _channel_crossed(af7_mean, self._af7_baseline_median, self._af7_baseline_mad)
+            or _channel_crossed(af8_mean, self._af8_baseline_median, self._af8_baseline_mad)
+        )
 
     def _append_buffer(self, frontal: np.ndarray, temporal: np.ndarray,
                        af7: np.ndarray, af8: np.ndarray) -> None:
@@ -422,6 +446,16 @@ class BlinkDetector(Stage):
         else:
             right_idx = len(buf) - 1
 
+        # Secondary peak: real blinks produce a positive overshoot ~50-150ms after trough.
+        # Check buf[right_idx+1 : right_idx+40] (≈150ms at 256Hz). Acts as confidence
+        # booster only (not a gate — would miss blinks at end of buffer).
+        secondary_peak = False
+        sp_end = right_idx + 40
+        if sp_end < len(buf):
+            after_right = buf[right_idx + 1:sp_end]
+            if len(after_right) >= 5 and float(np.max(after_right)) > self._baseline_median + 2.0:
+                secondary_peak = True
+
         # Duration check
         contiguous = right_idx - left_idx + 1
         dur_ms = contiguous / 256.0 * 1000.0
@@ -443,6 +477,7 @@ class BlinkDetector(Stage):
                 "half_amplitude_uv": round(half_amp, 1),
                 "onset_slope": 0.0,
                 "duration_ms": round(dur_ms, 1),
+                "secondary_peak": secondary_peak,
             }
             return True, meta  # too short for R², accept based on duration alone
 
@@ -486,6 +521,7 @@ class BlinkDetector(Stage):
             "half_amplitude_uv": round(half_amp, 1),
             "onset_slope": round(slope_down, 2),
             "duration_ms": round(dur_ms, 1),
+            "secondary_peak": secondary_peak,
         }
         self._log.debug("SHAPE R²: down=%.2f up=%.2f slopes=%.2f/%.2f → ACCEPT",
                        r2_down, r2_up, slope_down, slope_up)
@@ -571,8 +607,15 @@ class BlinkDetector(Stage):
             f_hf = _hf_rms(f_win)
             t_hf = _hf_rms(t_win)
             hf_ratio = t_hf / f_hf if f_hf > 0 else 0
-            if f_hf > 0 and hf_ratio > self.max_hf_ratio:
-                self._log.debug("REJECTED by clench guard: HF ratio=%.2f (max=%.1f)", hf_ratio, self.max_hf_ratio)
+            # Scale max_hf_ratio by signal quality: poor-fit sessions have elevated
+            # electrode-contact noise that inflates the temporal HF baseline,
+            # so relax the guard proportionally.
+            effective_max_hf_ratio = self.max_hf_ratio * (2.0 - self._frontal_quality)
+            if f_hf > 0 and hf_ratio > effective_max_hf_ratio:
+                self._log.debug(
+                    "REJECTED by clench guard: HF ratio=%.2f (effective_max=%.2f, quality=%.2f)",
+                    hf_ratio, effective_max_hf_ratio, self._frontal_quality,
+                )
                 return
 
         # Guard 2: reject if speech detector flagged active
@@ -619,8 +662,10 @@ class BlinkDetector(Stage):
         # Update rolling buffers
         self._append_buffer(frontal, temporal, af7, af8)
 
-        chunk_val = float(np.mean(frontal))
-        crossed = self._is_candidate(chunk_val)
+        af7_mean = float(np.mean(af7))
+        af8_mean = float(np.mean(af8))
+        chunk_val = (af7_mean + af8_mean) / 2.0
+        crossed = self._is_candidate(af7_mean, af8_mean)
 
         # Collect raw samples during calibration capture window
         if self._capture_active and (time.time() - self._capture_start) < self._capture_duration:
@@ -628,8 +673,8 @@ class BlinkDetector(Stage):
 
         # Debug: log significant deflections even if they don't cross threshold
         if chunk_val < -40:
-            sd = max(1.4826 * self._baseline_mad, 1.0) if self._baseline_samples >= 256 else 0
-            adaptive = (self._baseline_median - self.threshold_sd * sd) if self._baseline_samples >= 256 else None
+            sd = max(1.4826 * self._baseline_mad, 1.0) if self._baseline_samples >= 128 else 0
+            adaptive = (self._baseline_median - self.threshold_sd * sd) if self._baseline_samples >= 128 else None
             self._log.debug(
                 "deflection %.1f µV | baseline=%.1f sd=%.1f adaptive_thresh=%s | crossed=%s",
                 chunk_val, self._baseline_median, sd,
@@ -652,7 +697,9 @@ class BlinkDetector(Stage):
         # so MAD changes cannot raise the effective threshold above the calibrated point.
         chunk_mean = chunk_val
         n_samp = len(frontal)
-        if self._baseline_samples < 256:
+        # Update per-channel baselines alongside the combined baseline
+        self._update_channel_baselines(af7_mean, af8_mean)
+        if self._baseline_samples < 128:
             # During cold start, still reject extreme outliers once we have
             # enough data to know what "normal" looks like (after 64 samples)
             if self._baseline_samples < 64:
@@ -687,9 +734,10 @@ class BlinkDetector(Stage):
             self._log.debug("EMITTING: %d blink(s) in window (deepest=%.1f µV)", count, deepest_amp)
 
             emit_meta = self._last_blink_meta or {}
+            has_secondary = emit_meta.get("secondary_peak", False)
 
             if count >= 2:
-                base_conf = 0.85
+                base_conf = min(1.0, 0.85 + (0.05 if has_secondary else 0.0))
                 frame.events.append(Event(
                     kind="double_blink", timestamp=now,
                     confidence=round(base_conf * self._frontal_quality, 2),
@@ -697,7 +745,7 @@ class BlinkDetector(Stage):
                     metadata=emit_meta,
                 ))
             else:
-                base_conf = 0.9
+                base_conf = min(1.0, 0.9 + (0.05 if has_secondary else 0.0))
                 frame.events.append(Event(
                     kind="single_blink", timestamp=now,
                     confidence=round(base_conf * self._frontal_quality, 2),

@@ -193,6 +193,10 @@ class EEGServer:
                     "effective_thresh": round(effective_thresh, 2),
                     "baseline_samples": detector._baseline_samples,
                     "frontal_quality": round(detector._frontal_quality, 2),
+                    "af7_median": round(detector._af7_baseline_median, 2),
+                    "af7_mad": round(detector._af7_baseline_mad, 2),
+                    "af8_median": round(detector._af8_baseline_median, 2),
+                    "af8_mad": round(detector._af8_baseline_mad, 2),
                 }
                 log.info("SNAPSHOT detector: %s", snapshot)
                 await self._broadcast_text(json.dumps({"type": "detector_snapshot", **snapshot}))
