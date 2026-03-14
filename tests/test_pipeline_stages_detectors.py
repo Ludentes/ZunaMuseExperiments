@@ -144,7 +144,7 @@ def test_blink_detector_no_blink_in_noise():
     calm = rng.standard_normal((4, 64)).astype(np.float64) * 20
     frame = PipelineFrame(eeg=calm, ppg=None, imu=None, timestamp=t)
     detector.process(frame)
-    blink_events = [e for e in frame.events if "blink" in e.kind]
+    blink_events = [e for e in frame.events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 0
 
 
@@ -158,7 +158,7 @@ def test_blink_detector_detects_negative_deflection():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "single_blink"
 
@@ -185,7 +185,7 @@ def test_blink_detector_double_blink():
     events3 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2 + events3
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "double_blink"
 
@@ -212,7 +212,7 @@ def test_blink_detector_refractory_prevents_double_count():
     events3 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2 + events3
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 1
     assert blink_events[0].kind == "single_blink"
 
@@ -242,7 +242,7 @@ def test_blink_detector_suppressed_by_speech():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
     all_events.extend(events2)
 
-    assert len([e for e in all_events if "blink" in e.kind]) == 0
+    assert len([e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]) == 0
 
 
 def test_blink_detector_adaptive_threshold():
@@ -257,7 +257,7 @@ def test_blink_detector_adaptive_threshold():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) >= 1
 
 
@@ -286,7 +286,7 @@ def test_blink_detector_rejects_broad_deflection():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
     all_events.extend(events2)
 
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 0
 
 
@@ -304,7 +304,7 @@ def test_blink_detector_r2_accepts_tent_shape():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) >= 1
 
 
@@ -337,7 +337,7 @@ def test_blink_detector_r2_rejects_plateau():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
     all_events.extend(events2)
 
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 0, "Plateau shape should be rejected by shape guard"
 
 
@@ -352,7 +352,7 @@ def test_blink_detector_emits_metadata():
     events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
 
     all_events = events1 + events2
-    blink_events = [e for e in all_events if "blink" in e.kind]
+    blink_events = [e for e in all_events if "blink" in e.kind and "rejected" not in e.kind]
     assert len(blink_events) == 1
 
     meta = blink_events[0].metadata
@@ -374,7 +374,7 @@ def test_blink_detector_set_signal_quality_scales_confidence():
     t = _establish_baseline(det_high, rng, signal_mean=0.0)
     events1, t = _inject_blink(det_high, rng, t, signal_mean=0.0, blink_amp=-200.0)
     events2 = _flush_classify(det_high, rng, t, signal_mean=0.0)
-    high_blinks = [e for e in events1 + events2 if "blink" in e.kind]
+    high_blinks = [e for e in events1 + events2 if "blink" in e.kind and "rejected" not in e.kind]
     assert len(high_blinks) == 1
     high_conf = high_blinks[0].confidence
 
@@ -385,7 +385,7 @@ def test_blink_detector_set_signal_quality_scales_confidence():
     t = _establish_baseline(det_low, rng2, signal_mean=0.0)
     events1, t = _inject_blink(det_low, rng2, t, signal_mean=0.0, blink_amp=-200.0)
     events2 = _flush_classify(det_low, rng2, t, signal_mean=0.0)
-    low_blinks = [e for e in events1 + events2 if "blink" in e.kind]
+    low_blinks = [e for e in events1 + events2 if "blink" in e.kind and "rejected" not in e.kind]
     assert len(low_blinks) == 1
     low_conf = low_blinks[0].confidence
 

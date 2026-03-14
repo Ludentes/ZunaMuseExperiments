@@ -49,6 +49,7 @@ class EEGServer:
         self._recording_eeg: list = []
         self._recording_ppg: list = []
         self._recording_imu: list = []
+        self._blink_markers: list[float] = []  # relative timestamps of user-marked blinks
         self._eeg_buffer: list[np.ndarray] = []
         self._eeg_rolling: np.ndarray | None = None  # rolling 2s window
         self._eeg_rolling_max = 512  # 2s at 256Hz
@@ -175,7 +176,24 @@ class EEGServer:
             if detector:
                 threshold_sd = cmd.get("threshold_sd")
                 threshold_uv = cmd.get("threshold_uv")
-                detector.set_blink_threshold(threshold_sd=threshold_sd, threshold_uv=threshold_uv)
+                max_hf_ratio = cmd.get("max_hf_ratio")
+                detector.set_blink_threshold(threshold_sd=threshold_sd, threshold_uv=threshold_uv, max_hf_ratio=max_hf_ratio)
+        elif action == "set_guards":
+            detector = self._get_blink_detector()
+            if detector:
+                guards = cmd.get("guards", {})
+                detector.set_guards(guards)
+                await self._broadcast_text(json.dumps({
+                    "type": "guard_states",
+                    **detector.get_guard_states(),
+                }))
+        elif action == "get_guards":
+            detector = self._get_blink_detector()
+            if detector:
+                await self._broadcast_text(json.dumps({
+                    "type": "guard_states",
+                    **detector.get_guard_states(),
+                }))
         elif action == "snapshot_detector":
             detector = self._get_blink_detector()
             if detector:
@@ -205,6 +223,46 @@ class EEGServer:
             if detector:
                 detector.start_blink_capture(duration_s=0.7)
                 asyncio.ensure_future(self._poll_blink_capture())
+        elif action == "start_continuous_session":
+            session_id = f"continuous_{time.strftime('%Y%m%d_%H%M%S')}"
+            self._recording = True
+            self._recording_label = "continuous"
+            self._recording_start = time.time()
+            self._recording_trial_num = 0
+            self._recording_cue_time_ms = 0
+            self._recording_trial_duration_ms = 0
+            self._recording_session_id = session_id
+            self._recording_eeg.clear()
+            self._recording_ppg.clear()
+            self._recording_imu.clear()
+            self._blink_markers.clear()
+            log.info("Continuous session started — session=%s", session_id)
+            await self._broadcast_text(json.dumps({
+                "type": "continuous_session_started",
+                "session_id": session_id,
+            }))
+        elif action == "mark_blink":
+            if self._recording:
+                relative_ts = time.time() - self._recording_start
+                self._blink_markers.append(relative_ts)
+                log.info("Blink marker at %.3fs (%d total)", relative_ts, len(self._blink_markers))
+                await self._broadcast_text(json.dumps({
+                    "type": "blink_marked",
+                    "timestamp": relative_ts,
+                    "count": len(self._blink_markers),
+                }))
+        elif action == "stop_continuous_session":
+            if self._recording:
+                filepath = self._save_recording()
+                self._recording = False
+                self._last_saved_path = filepath
+                log.info("Continuous session stopped — saved to %s (%d markers)",
+                         filepath, len(self._blink_markers))
+                await self._broadcast_text(json.dumps({
+                    "type": "continuous_session_saved",
+                    "filepath": str(filepath),
+                    "markers": len(self._blink_markers),
+                }))
         elif action == "discard_last_recording":
             path = getattr(self, '_last_saved_path', None)
             if path and Path(path).exists():
@@ -240,6 +298,7 @@ class EEGServer:
         imu = np.concatenate(self._recording_imu, axis=1) if self._recording_imu else np.array([])
 
         npz_path = rec_dir / f"{fname}.npz"
+        markers = np.array(self._blink_markers) if self._blink_markers else np.array([])
         np.savez(npz_path, eeg=eeg, ppg=ppg, imu=imu,
                  label=self._recording_label,
                  session_id=session_id,
@@ -248,7 +307,8 @@ class EEGServer:
                  trial_duration_ms=self._recording_trial_duration_ms,
                  duration=duration,
                  ch_names=CH_NAMES, sfreq=256,
-                 ppg_sfreq=64, imu_sfreq=52)
+                 ppg_sfreq=64, imu_sfreq=52,
+                 blink_markers=markers)
         log.info("Saved %s — EEG %s (%.1fs) trial=%d cue=%dms",
                  npz_path, eeg.shape if eeg.size else "empty",
                  duration, trial_num, self._recording_cue_time_ms)

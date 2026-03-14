@@ -46,8 +46,8 @@ const PROTOCOLS: Protocol[] = [
   { label: "flicker_5hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 5 },
   { label: "flicker_6hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 6 },
   // Continuous session: metronome-prompted blinks for streaming detector evaluation
-  // 30s × 3 trials → ~30 blinks per session. metronomePeriod=3 fires at t=0,3,6,...,27s.
-  { label: "blink_continuous", trialDuration: 30, cueAt: 0, reps: 3, restBetween: 10, instruction: "Blink on each prompt", metronomePeriod: 3 },
+  // 32s × 3 trials. 2s warmup, then beats at t=2,5,8,...,29s = 10 blinks per trial.
+  { label: "blink_continuous", trialDuration: 32, cueAt: 2, reps: 3, restBetween: 10, instruction: "Blink on each prompt (2s warmup)", metronomePeriod: 3 },
 ];
 
 type SessionState =
@@ -267,12 +267,15 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
 
           const elapsed = (performance.now() - trialStartRef.current) / 1000;
 
-          // Metronome beats (overrides single cue for metronome protocols)
+          // Metronome beats (offset by cueAt so first beat fires after warmup)
           if (proto.metronomePeriod) {
-            const beat = Math.floor(elapsed / proto.metronomePeriod);
-            if (beat > lastBeatRef.current) {
-              lastBeatRef.current = beat;
-              playBeep(660, 80);
+            const metronomeElapsed = elapsed - proto.cueAt;
+            if (metronomeElapsed >= 0) {
+              const beat = Math.floor(metronomeElapsed / proto.metronomePeriod);
+              if (beat > lastBeatRef.current) {
+                lastBeatRef.current = beat;
+                playBeep(660, 80);
+              }
             }
           }
 

@@ -13,10 +13,10 @@ import { BlinkFlash } from "../components/demo/BlinkFlash";
 import { CommandArrow } from "../components/demo/CommandArrow";
 import { EEGStrip } from "../components/demo/EEGStrip";
 import { EventLog } from "../components/demo/EventLog";
-import { KioskPlayer } from "../components/demo/KioskPlayer";
 import { KioskToggle } from "../components/demo/KioskToggle";
 import { CalibrationOverlay } from "../components/demo/CalibrationOverlay";
 import { DetectorControls } from "../components/demo/DetectorControls";
+import { ContinuousSession } from "../components/demo/ContinuousSession";
 import { concentrationToHex } from "../lib/concentrationColor";
 
 export const Route = createFileRoute("/demo")({
@@ -128,11 +128,11 @@ function DemoPage() {
 
       {/* Main content: two columns */}
       <div
-        className="flex-1 grid grid-cols-5 min-h-0"
+        className="flex-1 grid grid-cols-2 min-h-0"
         style={{ gap: "var(--gap)", padding: "var(--gap)" }}
       >
-        {/* Left column: brain (3/5) */}
-        <div className="col-span-3 flex flex-col min-h-0">
+        {/* Left column: brain (1/2) */}
+        <div className="flex flex-col min-h-0">
           <div className="flex-1 min-h-0">
             <BrainHeatmap
               bandPowers={getBandPowers()}
@@ -143,9 +143,9 @@ function DemoPage() {
           <BandSelector selected={selectedBand} onSelect={setSelectedBand} />
         </div>
 
-        {/* Right column: panels (2/5) */}
+        {/* Right column: panels (1/2) */}
         <div
-          className="col-span-2 flex flex-col min-h-0"
+          className="flex flex-col min-h-0"
           style={{ gap: "var(--gap)" }}
         >
           {/* Light orb */}
@@ -229,11 +229,11 @@ function DemoPage() {
             </div>
           </div>
 
-          {/* Kiosk player */}
-          <KioskPlayer lastEvent={lastEvent} />
-
           {/* Detector controls */}
           <DetectorControls sendCommand={sendCommand} isConnected={isConnected} lastMessage={lastMessage} />
+
+          {/* Continuous session */}
+          <ContinuousSession sendCommand={sendCommand} isConnected={isConnected} lastMessage={lastMessage} />
 
           {/* Event log */}
           <div className="flex-1 min-h-0 overflow-hidden">

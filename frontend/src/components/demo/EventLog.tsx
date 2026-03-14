@@ -7,19 +7,26 @@ const KIND_COLORS: Record<string, string> = {
   clench: "var(--status-warn)",
   nod_yes: "var(--status-good)",
   nod_no: "var(--status-bad)",
+  blink_rejected: "var(--status-bad)",
 };
 
 const KIND_ACTIONS: Record<string, string> = {
   single_blink: "blink detected",
-  double_blink: "kiosk → next",
+  double_blink: "kiosk -> next",
   clench: "clench detected",
-  nod_yes: "nod → yes",
-  nod_no: "shake → no",
+  nod_yes: "nod -> yes",
+  nod_no: "shake -> no",
 };
 
 function formatTime(ts: number): string {
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString("en-US", { hour12: false });
+}
+
+function rejectionLabel(ev: BciEvent): string {
+  const guard = (ev.metadata?.guard as string) ?? "?";
+  const detail = (ev.metadata?.detail as string) ?? "";
+  return detail ? `${guard}: ${detail}` : guard;
 }
 
 interface Props {
@@ -57,20 +64,32 @@ export function EventLog({ events }: Props) {
           <div style={{ color: "var(--text-dim)" }}>Waiting for events...</div>
         )}
         {reversed.map((ev, i) => {
-          const dimmed = (ev.confidence ?? 1) < 0.6;
+          const isRejection = ev.kind === "blink_rejected";
+          const dimmed = isRejection || (ev.confidence ?? 1) < 0.6;
           return (
-            <div key={`${ev.timestamp}-${i}`} className="flex items-center gap-2" style={{ opacity: dimmed ? 0.4 : 1 }}>
+            <div key={`${ev.timestamp}-${i}`} className="flex items-center gap-2" style={{ opacity: dimmed ? 0.5 : 1 }}>
               <span style={{ color: "var(--text-dim)" }}>{formatTime(ev.timestamp)}</span>
-              <span style={{ color: KIND_COLORS[ev.kind] ?? "var(--text-secondary)" }}>
-                {ev.kind.replace(/_/g, " ")}
-              </span>
-              <span style={{ color: "var(--text-dim)" }}>
-                ({(ev.confidence * 100).toFixed(0)}%)
-              </span>
-              <span style={{ color: "var(--text-dim)" }}>→</span>
-              <span style={{ color: dimmed ? "var(--text-dim)" : "var(--status-info)" }}>
-                {KIND_ACTIONS[ev.kind] ?? ev.kind}
-              </span>
+              {isRejection ? (
+                <>
+                  <span style={{ color: "var(--status-bad)" }}>X</span>
+                  <span style={{ color: "var(--text-dim)" }}>
+                    {rejectionLabel(ev)}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: KIND_COLORS[ev.kind] ?? "var(--text-secondary)" }}>
+                    {ev.kind.replace(/_/g, " ")}
+                  </span>
+                  <span style={{ color: "var(--text-dim)" }}>
+                    ({(ev.confidence * 100).toFixed(0)}%)
+                  </span>
+                  <span style={{ color: "var(--text-dim)" }}>{"->"}</span>
+                  <span style={{ color: dimmed ? "var(--text-dim)" : "var(--status-info)" }}>
+                    {KIND_ACTIONS[ev.kind] ?? ev.kind}
+                  </span>
+                </>
+              )}
             </div>
           );
         })}
