@@ -113,7 +113,7 @@ class BlinkDetector(Stage):
 
     def __init__(
         self,
-        threshold_uv: float = -50.0,
+        threshold_uv: float = -9999.0,
         threshold_sd: float = 1.5,
         baseline_alpha: float = 0.01,
         refractory_ms: float = 100,
@@ -127,7 +127,7 @@ class BlinkDetector(Stage):
         # threshold_uv: -9999 = disabled sentinel (use only adaptive).
         # Set by set_calibrated_threshold() or set_blink_threshold() to act as
         # a calibrated absolute floor that won't drift with MAD changes.
-        self.threshold_uv = -9999.0
+        self.threshold_uv = threshold_uv
         self.threshold_sd = threshold_sd
         self.baseline_alpha = baseline_alpha
         self.refractory_ms = refractory_ms
