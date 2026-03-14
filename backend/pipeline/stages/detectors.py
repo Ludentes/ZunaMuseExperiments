@@ -152,6 +152,12 @@ class BlinkDetector(Stage):
         self._classify_deadline: float = 0.0
         self._frontal_quality: float = 1.0
         self._last_blink_meta: dict = {}
+        # Motion guard: track last large gyro peak time so the refractory window
+        # extends for motion_refractory_ms after a nod/shake — the EEG artifact
+        # from head movement arrives 1-2 frames after the gyro spike, so checking
+        # only the current frame misses these cross-talk blinks.
+        self._last_motion_time: float = 0.0
+        self._motion_refractory_ms: float = 300.0
         # Adaptive baseline (rolling window + median/MAD)
         self._baseline_window: deque[float] = deque(maxlen=256)  # ~4s of chunk means at 64 chunks/s
         self._baseline_median: float = 0.0
@@ -517,13 +523,21 @@ class BlinkDetector(Stage):
         Called on the trailing edge of a threshold-crossing streak, after
         the full blink waveform has been buffered.
         """
-        # Guard 0: reject if head is moving (nod/shake causes EEG artifact)
+        # Guard 0: reject if head is moving OR recently moved.
+        # EEG artifacts from nod/shake arrive 1-2 frames after the gyro spike,
+        # so we gate on both the current frame AND a rolling refractory window.
         if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
             gyro_pitch_peak = float(np.max(np.abs(frame.imu[4])))
             gyro_yaw_peak = float(np.max(np.abs(frame.imu[5])))
             if gyro_pitch_peak > 20.0 or gyro_yaw_peak > 20.0:
-                self._log.debug("REJECTED by motion guard: pitch=%.1f yaw=%.1f deg/s", gyro_pitch_peak, gyro_yaw_peak)
+                self._last_motion_time = now
+                self._log.debug("REJECTED by motion guard (current): pitch=%.1f yaw=%.1f deg/s",
+                               gyro_pitch_peak, gyro_yaw_peak)
                 return
+        motion_elapsed_ms = (now - self._last_motion_time) * 1000
+        if motion_elapsed_ms < self._motion_refractory_ms:
+            self._log.debug("REJECTED by motion refractory (%.0f ms since last motion)", motion_elapsed_ms)
+            return
 
         # Guard 0.5: bilateral correlation — real blinks correlate AF7↔AF8
         if self.min_bilateral_corr > 0:
@@ -612,6 +626,14 @@ class BlinkDetector(Stage):
 
         # Update rolling buffers
         self._append_buffer(frontal, temporal, af7, af8)
+
+        # Track motion in every frame (not just when a blink candidate fires)
+        # so the refractory is set even during quiet EEG frames with head motion.
+        if frame.imu is not None and frame.imu.shape[0] > 5 and frame.imu.shape[1] > 0:
+            gyro_pitch = float(np.max(np.abs(frame.imu[4])))
+            gyro_yaw = float(np.max(np.abs(frame.imu[5])))
+            if gyro_pitch > 20.0 or gyro_yaw > 20.0:
+                self._last_motion_time = now
 
         chunk_val = float(np.mean(frontal))
         crossed = self._is_candidate(chunk_val)
