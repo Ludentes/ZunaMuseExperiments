@@ -15,6 +15,7 @@ import { EEGStrip } from "../components/demo/EEGStrip";
 import { EventLog } from "../components/demo/EventLog";
 import { KioskPlayer } from "../components/demo/KioskPlayer";
 import { KioskToggle } from "../components/demo/KioskToggle";
+import { CalibrationOverlay } from "../components/demo/CalibrationOverlay";
 import { concentrationToHex } from "../lib/concentrationColor";
 
 export const Route = createFileRoute("/demo")({
@@ -22,12 +23,18 @@ export const Route = createFileRoute("/demo")({
 });
 
 function DemoPage() {
-  const { buffers, metricsRef, eventsRef, isConnected } = useSensorStream();
+  const { buffers, metricsRef, eventsRef, isConnected, sendCommand } = useSensorStream();
   const metrics = useMetrics(metricsRef);
   const { getBandPowers } = useBandPowers(metrics);
   const { events, lastEvent } = useEvents(eventsRef);
   const [selectedBand, setSelectedBand] = useState<BandName>("focus");
   const [kioskEnabled, setKioskEnabled] = useState(false);
+  const [calibrated, setCalibrated] = useState(false);
+
+  // Reset calibration on disconnect
+  useEffect(() => {
+    if (!isConnected) setCalibrated(false);
+  }, [isConnected]);
   const { connected: kioskConnected, sendPlayback } = useKioskMqtt(kioskEnabled);
 
   // Forward BCI events to real kiosk
@@ -64,6 +71,17 @@ function DemoPage() {
       {/* Blink flash + command arrow overlays */}
       <BlinkFlash lastEvent={lastEvent} />
       <CommandArrow lastEvent={lastEvent} />
+
+      {/* Calibration overlay */}
+      {isConnected && !calibrated && (
+        <CalibrationOverlay
+          headbandState={metrics?.headband}
+          signalQuality={metrics?.eeg?.signal_quality}
+          lastEvent={lastEvent}
+          sendCommand={sendCommand}
+          onComplete={() => setCalibrated(true)}
+        />
+      )}
 
       {/* Top bar */}
       <div

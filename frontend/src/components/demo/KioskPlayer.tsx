@@ -23,6 +23,7 @@ export function KioskPlayer({ lastEvent, clips = DEFAULT_CLIPS }: Props) {
   useEffect(() => {
     if (!lastEvent) return;
     if (lastEvent.kind !== "double_blink") return;
+    if ((lastEvent.confidence ?? 1) < 0.6) return;
     if (lastEvent.timestamp === lastProcessedRef.current) return;
     lastProcessedRef.current = lastEvent.timestamp;
     nextClip();

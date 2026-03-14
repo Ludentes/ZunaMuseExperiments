@@ -10,6 +10,7 @@ from brainflow.board_shim import BoardShim
 from brainflow.data_filter import DataFilter
 
 from backend.acquisition import Acquisition
+from backend.pipeline.stages.detectors import BlinkDetector
 from backend.config import Config
 from backend.pipeline.factory import create_default_pipeline
 from backend.pipeline.serialize import frame_to_metrics
@@ -163,6 +164,17 @@ class EEGServer:
                     "available": False,
                     "enabled": False,
                 }))
+        elif action == "calibrate_blink":
+            detector = self._get_blink_detector()
+            if detector:
+                median_peak = cmd.get("median_peak_amplitude_uv", -50.0)
+                detector.set_calibrated_threshold(median_peak)
+                log.info("Calibrate blink: median_peak=%.1f µV", median_peak)
+        elif action == "capture_blink_sample":
+            detector = self._get_blink_detector()
+            if detector:
+                detector.start_blink_capture(duration_s=0.7)
+                asyncio.ensure_future(self._poll_blink_capture())
         elif action == "discard_last_recording":
             path = getattr(self, '_last_saved_path', None)
             if path and Path(path).exists():
@@ -273,6 +285,31 @@ class EEGServer:
                 return stage
         return None
 
+    def _get_blink_detector(self) -> BlinkDetector | None:
+        """Find BlinkDetector in pipeline if it exists."""
+        for stage in self._pipeline.stages:
+            if isinstance(stage, BlinkDetector):
+                return stage
+        return None
+
+    async def _poll_blink_capture(self) -> None:
+        """Poll BlinkDetector until capture window closes, then broadcast the result."""
+        for _ in range(20):  # up to 1s in 50ms steps
+            await asyncio.sleep(0.05)
+            detector = self._get_blink_detector()
+            if detector:
+                result = detector.get_capture_result()
+                if result is not None:
+                    await self._broadcast_text(json.dumps({
+                        "type": "bci_event",
+                        "kind": "blink_sample",
+                        "confidence": 1.0,
+                        "channel": "AF7+AF8",
+                        "timestamp": time.time(),
+                        "metadata": result,
+                    }))
+                    return
+
     async def _broadcast_binary(self, data: bytes):
         if not self.clients:
             return
@@ -342,6 +379,7 @@ class EEGServer:
                             "confidence": event.confidence,
                             "channel": event.channel,
                             "timestamp": event.timestamp,
+                            "metadata": event.metadata,
                         }))
 
             if self._ppg_enabled:
@@ -413,6 +451,14 @@ class EEGServer:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._pipeline.run, Cadence.SLOW, frame)
             metrics = frame_to_metrics(frame)
+
+            from backend.pipeline.stages.features import SignalQualityResult
+            sq = frame.get(SignalQualityResult)
+            if sq:
+                detector = self._get_blink_detector()
+                if detector:
+                    frontal_avg = (sq.quality.get("AF7", 0) + sq.quality.get("AF8", 0)) / 2
+                    detector.set_signal_quality(frontal_avg)
 
             metrics["session"] = {
                 "recording": self._recording,

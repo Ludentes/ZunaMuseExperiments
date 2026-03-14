@@ -84,4 +84,5 @@ export interface BciEvent {
   confidence: number;
   timestamp: number;
   channel?: string;
+  metadata?: Record<string, unknown>;
 }

@@ -56,21 +56,24 @@ export function EventLog({ events }: Props) {
         {reversed.length === 0 && (
           <div style={{ color: "var(--text-dim)" }}>Waiting for events...</div>
         )}
-        {reversed.map((ev, i) => (
-          <div key={`${ev.timestamp}-${i}`} className="flex items-center gap-2">
-            <span style={{ color: "var(--text-dim)" }}>{formatTime(ev.timestamp)}</span>
-            <span style={{ color: KIND_COLORS[ev.kind] ?? "var(--text-secondary)" }}>
-              {ev.kind.replace(/_/g, " ")}
-            </span>
-            <span style={{ color: "var(--text-dim)" }}>
-              ({(ev.confidence * 100).toFixed(0)}%)
-            </span>
-            <span style={{ color: "var(--text-dim)" }}>→</span>
-            <span style={{ color: "var(--status-info)" }}>
-              {KIND_ACTIONS[ev.kind] ?? ev.kind}
-            </span>
-          </div>
-        ))}
+        {reversed.map((ev, i) => {
+          const dimmed = (ev.confidence ?? 1) < 0.6;
+          return (
+            <div key={`${ev.timestamp}-${i}`} className="flex items-center gap-2" style={{ opacity: dimmed ? 0.4 : 1 }}>
+              <span style={{ color: "var(--text-dim)" }}>{formatTime(ev.timestamp)}</span>
+              <span style={{ color: KIND_COLORS[ev.kind] ?? "var(--text-secondary)" }}>
+                {ev.kind.replace(/_/g, " ")}
+              </span>
+              <span style={{ color: "var(--text-dim)" }}>
+                ({(ev.confidence * 100).toFixed(0)}%)
+              </span>
+              <span style={{ color: "var(--text-dim)" }}>→</span>
+              <span style={{ color: dimmed ? "var(--text-dim)" : "var(--status-info)" }}>
+                {KIND_ACTIONS[ev.kind] ?? ev.kind}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

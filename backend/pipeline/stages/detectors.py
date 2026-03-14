@@ -145,8 +145,10 @@ class BlinkDetector(Stage):
                 "No blink template at %s — matched filter disabled", self._TEMPLATE_PATH
             )
         self._last_blink_time: float = 0.0
-        self._pending_blinks: deque[float] = deque(maxlen=10)
+        self._pending_blinks: deque[tuple[float, float]] = deque(maxlen=10)
         self._classify_deadline: float = 0.0
+        self._frontal_quality: float = 1.0
+        self._last_blink_meta: dict = {}
         # Adaptive baseline (rolling window + median/MAD)
         self._baseline_window: deque[float] = deque(maxlen=256)  # ~4s of chunk means at 64 chunks/s
         self._baseline_median: float = 0.0
@@ -161,6 +163,11 @@ class BlinkDetector(Stage):
         self._buf_filled: bool = False
         # Sustained deflection counter: real blinks cross threshold for multiple consecutive chunks
         self._consecutive_crossed: int = 0
+        # Raw capture window for calibration (measures deflection independent of threshold)
+        self._capture_active: bool = False
+        self._capture_start: float = 0.0
+        self._capture_duration: float = 0.7
+        self._capture_samples: list[float] = []
 
     def _update_baseline(self, chunk_mean: float, n_samples: int = 1) -> None:
         """Update rolling window baseline with median/MAD.
@@ -178,6 +185,103 @@ class BlinkDetector(Stage):
             self._baseline_mad = float(np.median(np.abs(values - self._baseline_median)))
             if self._baseline_mad < 0.5:
                 self._baseline_mad = 0.5  # floor to prevent zero-MAD in perfectly stable signals
+
+    def set_signal_quality(self, frontal_quality: float) -> None:
+        """Set frontal signal quality (0-1) to scale blink confidence."""
+        self._frontal_quality = max(0.0, min(1.0, frontal_quality))
+
+    def set_calibrated_threshold(self, median_peak_amplitude_uv: float) -> None:
+        """Adjust threshold_sd to fire at the half-amplitude of the measured blink peak.
+
+        Takes the median peak amplitude (most negative point of a blink), and sets
+        threshold_sd so the detector fires at the halfway point between baseline and peak.
+        This gives ~50ms faster response than waiting for the peak itself.
+
+        Args:
+            median_peak_amplitude_uv: Median peak amplitude from calibration captures (negative µV).
+        """
+        robust_sd = 1.4826 * self._baseline_mad
+        if robust_sd < 1e-6:
+            self._log.warning("Cannot calibrate: robust_sd near zero (baseline not established yet?)")
+            return
+        old_thresh_sd = self.threshold_sd
+        old_effective_uv = self._baseline_median - old_thresh_sd * robust_sd
+        # SDs from baseline to peak
+        peak_sds = abs(median_peak_amplitude_uv - self._baseline_median) / robust_sd
+        # Fire at half-amplitude = half the deflection from baseline → half the SDs
+        new_threshold = max(1.5, peak_sds * 0.5)
+        new_effective_uv = self._baseline_median - new_threshold * robust_sd
+        half_amp_uv = (median_peak_amplitude_uv + self._baseline_median) / 2.0
+        self._log.info(
+            "CALIBRATE: peak=%.1f µV is %.1f SDs from baseline (%.1f) | "
+            "half-amplitude target=%.1f µV",
+            median_peak_amplitude_uv, peak_sds, self._baseline_median, half_amp_uv,
+        )
+        self._log.info(
+            "CALIBRATE: threshold_sd %.2f → %.2f | effective_thresh %.1f → %.1f µV",
+            old_thresh_sd, new_threshold, old_effective_uv, new_effective_uv,
+        )
+        self._log.info(
+            "CALIBRATE: peak %.1f µV would now %s detection (fires at %.1f µV, half-amp=%.1f µV)",
+            median_peak_amplitude_uv,
+            "TRIGGER" if median_peak_amplitude_uv < new_effective_uv else "MISS",
+            new_effective_uv, half_amp_uv,
+        )
+        self.threshold_sd = new_threshold
+
+    def start_blink_capture(self, duration_s: float = 0.7) -> None:
+        """Open a raw capture window to measure blink amplitude independent of threshold.
+
+        Collects all frontal samples for `duration_s` seconds, then the result
+        is available via `get_capture_result()`. Used for calibration so we can
+        measure what the user's blink actually looks like before the detector is tuned.
+        """
+        self._capture_start = time.time()
+        self._capture_duration = duration_s
+        self._capture_samples = []
+        self._capture_active = True
+        self._log.info("Blink capture window opened (%.1fs)", duration_s)
+
+    def get_capture_result(self) -> dict | None:
+        """Return capture result if the window is complete, else None.
+
+        Returns dict with amplitude_uv and half_amplitude_uv (both negative for blinks).
+        Returns None if capture is still in progress or no capture was started.
+        """
+        if not self._capture_active:
+            return None
+        if time.time() - self._capture_start < self._capture_duration:
+            return None  # still in window
+        self._capture_active = False
+        if not self._capture_samples:
+            self._log.warning("Blink capture: no samples collected — pipeline may not be running")
+            return {"amplitude_uv": 0.0, "half_amplitude_uv": 0.0, "baseline_stable": False}
+        samples = self._capture_samples
+        peak_val = float(min(samples))
+        baseline_stable = self._baseline_samples >= 256
+        # Half-amplitude relative to baseline (midpoint from baseline to peak).
+        # When baseline is not stable, fall back to absolute peak/2 (less accurate).
+        if baseline_stable:
+            half_amp = (peak_val + self._baseline_median) / 2.0
+        else:
+            half_amp = peak_val / 2.0
+        robust_sd = 1.4826 * self._baseline_mad
+        current_thresh = self._baseline_median - self.threshold_sd * robust_sd
+        sds_from_baseline = abs(peak_val - self._baseline_median) / robust_sd if robust_sd > 0 else 0
+        would_detect = peak_val < current_thresh
+        self._log.info(
+            "CAPTURE result: peak=%.1f µV, half=%.1f µV (%d samples) | "
+            "baseline=%.1f (stable=%s), robust_sd=%.1f, current_thresh=%.1f µV (%.1f SD) | "
+            "peak is %.1f SDs from baseline → would_detect=%s",
+            peak_val, half_amp, len(samples),
+            self._baseline_median, baseline_stable, robust_sd, current_thresh, self.threshold_sd,
+            sds_from_baseline, would_detect,
+        )
+        return {
+            "amplitude_uv": round(peak_val, 1),
+            "half_amplitude_uv": round(half_amp, 1),
+            "baseline_stable": baseline_stable,
+        }
 
     def _is_candidate(self, chunk_mean: float) -> bool:
         """Check if chunk_mean exceeds adaptive MAD-based threshold.
@@ -229,7 +333,7 @@ class BlinkDetector(Stage):
             self._buf_pos = rem
             self._buf_filled = True
 
-    def _check_shape(self) -> bool:
+    def _check_shape(self) -> tuple[bool, dict]:
         """Validate blink shape using BLINKER-style R² tent fitting.
 
         A real blink has a characteristic tent shape: linear downstroke to peak,
@@ -241,10 +345,10 @@ class BlinkDetector(Stage):
 
         Falls back to duration-only check if buffer is too small for R².
 
-        Returns True if shape is blink-like.
+        Returns (is_blink_like, metadata_dict).
         """
         if not self._buf_filled and self._buf_pos < self._HALF_WIN * 2:
-            return True  # not enough data, accept
+            return True, {}  # not enough data, accept
 
         # Reconstruct ordered buffer
         if self._buf_filled:
@@ -284,17 +388,23 @@ class BlinkDetector(Stage):
 
         if dur_ms < self.min_deflection_ms:
             self._log.debug("SHAPE: too brief %.0fms < %.0fms", dur_ms, self.min_deflection_ms)
-            return False
+            return False, {}
         if dur_ms > self.max_deflection_ms:
             self._log.debug("SHAPE: too broad %.0fms > %.0fms", dur_ms, self.max_deflection_ms)
-            return False
+            return False, {}
 
         # R² tent fitting: need at least 4 samples per half for meaningful regression
         downstroke = buf[left_idx:min_idx + 1]
         upstroke = buf[min_idx:right_idx + 1]
 
         if len(downstroke) < 4 or len(upstroke) < 4:
-            return True  # too short for R², accept based on duration alone
+            meta = {
+                "amplitude_uv": round(peak_val, 1),
+                "half_amplitude_uv": round(half_amp, 1),
+                "onset_slope": 0.0,
+                "duration_ms": round(dur_ms, 1),
+            }
+            return True, meta  # too short for R², accept based on duration alone
 
         # Fit inner 80% of each half. Returns (R², slope).
         def r_squared_and_slope(segment: np.ndarray) -> tuple[float, float]:
@@ -329,11 +439,17 @@ class BlinkDetector(Stage):
                 self._log.debug(
                     "SHAPE slope: down=%.2f up=%.2f (min_mag=%.2f) → REJECT (plateau)",
                     slope_down, slope_up, min_slope)
-                return False
+                return False, {}
 
+        meta = {
+            "amplitude_uv": round(peak_val, 1),
+            "half_amplitude_uv": round(half_amp, 1),
+            "onset_slope": round(slope_down, 2),
+            "duration_ms": round(dur_ms, 1),
+        }
         self._log.debug("SHAPE R²: down=%.2f up=%.2f slopes=%.2f/%.2f → ACCEPT",
                        r2_down, r2_up, slope_down, slope_up)
-        return True
+        return True, meta
 
     def _check_template(self) -> bool:
         """Validate blink using matched filter on buffered data.
@@ -425,9 +541,11 @@ class BlinkDetector(Stage):
             return
 
         # Guard 3: shape validation — reject non-tent-shaped deflections
-        if not self._check_shape():
+        shape_ok, blink_meta = self._check_shape()
+        if not shape_ok:
             self._log.debug("REJECTED by shape guard")
             return
+        self._last_blink_meta = blink_meta
 
         # Guard 4: matched filter — reject if template match is poor
         if not self._check_template():
@@ -437,7 +555,8 @@ class BlinkDetector(Stage):
         elapsed_ms = (now - self._last_blink_time) * 1000
         if elapsed_ms >= self.refractory_ms:
             self._last_blink_time = now
-            self._pending_blinks.append(now)
+            amp = blink_meta.get("amplitude_uv", 0.0) if blink_meta else 0.0
+            self._pending_blinks.append((now, amp))
             self._log.debug("ACCEPTED blink candidate (elapsed=%.0f ms)", elapsed_ms)
             if len(self._pending_blinks) == 1:
                 self._classify_deadline = now + self.classify_window_ms / 1000
@@ -462,6 +581,10 @@ class BlinkDetector(Stage):
         chunk_val = float(np.mean(frontal))
         crossed = self._is_candidate(chunk_val)
 
+        # Collect raw samples during calibration capture window
+        if self._capture_active and (time.time() - self._capture_start) < self._capture_duration:
+            self._capture_samples.extend(frontal.tolist())
+
         # Debug: log significant deflections even if they don't cross threshold
         if chunk_val < -40:
             sd = max(1.4826 * self._baseline_mad, 1.0) if self._baseline_samples >= 256 else 0
@@ -473,11 +596,14 @@ class BlinkDetector(Stage):
                 crossed,
             )
 
-        # Always update baseline using chunk MEAN (not min) if it's close to
-        # current baseline. This tracks slow drift while ignoring blink spikes.
-        # During blinks: chunk mean is very deviant → outside 3 robust SDs → no update.
-        # During drift: chunk mean shifts gradually → within 3 robust SDs → updates.
+        # Always update baseline using chunk MEAN if not contaminated by artifact.
+        # Guard uses chunk MIN (not mean) so that blink-contaminated chunks are
+        # rejected even when the chunk mean stays within 3 SDs of baseline.
+        # Blink mean ≈ 1-2 SDs below baseline (4-sample chunk; only 1-2 samples
+        # are in the dip) → mean-based guard leaks blinks in → baseline drifts
+        # negative over long sessions → threshold becomes unreachable.
         chunk_mean = chunk_val
+        chunk_min = float(np.min(frontal))
         n_samp = len(frontal)
         if self._baseline_samples < 256:
             # During cold start, still reject extreme outliers once we have
@@ -486,11 +612,11 @@ class BlinkDetector(Stage):
                 self._update_baseline(chunk_mean, n_samp)
             else:
                 robust_sd = 1.4826 * self._baseline_mad
-                if abs(chunk_mean - self._baseline_median) < 5 * robust_sd:
+                if chunk_min > (self._baseline_median - 5 * robust_sd):
                     self._update_baseline(chunk_mean, n_samp)
         else:
             robust_sd = 1.4826 * self._baseline_mad
-            if abs(chunk_mean - self._baseline_median) < 3 * robust_sd:
+            if chunk_min > (self._baseline_median - 3 * robust_sd):
                 self._update_baseline(chunk_mean, n_samp)
 
         if crossed:
@@ -509,18 +635,27 @@ class BlinkDetector(Stage):
         # Emit events once the classification window expires
         if self._pending_blinks and now >= self._classify_deadline:
             count = len(self._pending_blinks)
+            deepest_amp = min(amp for _, amp in self._pending_blinks)
             self._pending_blinks.clear()
-            self._log.debug("EMITTING: %d blink(s) in window", count)
+            self._log.debug("EMITTING: %d blink(s) in window (deepest=%.1f µV)", count, deepest_amp)
+
+            emit_meta = self._last_blink_meta or {}
 
             if count >= 2:
+                base_conf = 0.85
                 frame.events.append(Event(
-                    kind="double_blink", timestamp=now, confidence=0.85,
+                    kind="double_blink", timestamp=now,
+                    confidence=round(base_conf * self._frontal_quality, 2),
                     channel="AF7+AF8",
+                    metadata=emit_meta,
                 ))
             else:
+                base_conf = 0.9
                 frame.events.append(Event(
-                    kind="single_blink", timestamp=now, confidence=0.9,
+                    kind="single_blink", timestamp=now,
+                    confidence=round(base_conf * self._frontal_quality, 2),
                     channel="AF7+AF8",
+                    metadata=emit_meta,
                 ))
 
 

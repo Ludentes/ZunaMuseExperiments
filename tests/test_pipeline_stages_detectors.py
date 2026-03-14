@@ -342,6 +342,73 @@ def test_blink_detector_r2_rejects_plateau():
 
 
 
+def test_blink_detector_emits_metadata():
+    """Blink events should include amplitude_uv, half_amplitude_uv, onset_slope, duration_ms metadata."""
+    rng = np.random.default_rng(42)
+    detector = BlinkDetector(classify_window_ms=100, mf_threshold=0)
+
+    t = _establish_baseline(detector, rng, signal_mean=0.0)
+    events1, t = _inject_blink(detector, rng, t, signal_mean=0.0, blink_amp=-200.0)
+    events2 = _flush_classify(detector, rng, t, signal_mean=0.0)
+
+    all_events = events1 + events2
+    blink_events = [e for e in all_events if "blink" in e.kind]
+    assert len(blink_events) == 1
+
+    meta = blink_events[0].metadata
+    assert "amplitude_uv" in meta, f"Missing amplitude_uv in metadata: {meta}"
+    assert "half_amplitude_uv" in meta, f"Missing half_amplitude_uv in metadata: {meta}"
+    assert "onset_slope" in meta, f"Missing onset_slope in metadata: {meta}"
+    assert "duration_ms" in meta, f"Missing duration_ms in metadata: {meta}"
+    assert meta["amplitude_uv"] < -50.0, f"Expected large negative amplitude, got {meta['amplitude_uv']}"
+    assert meta["duration_ms"] > 0, f"Expected positive duration, got {meta['duration_ms']}"
+
+
+def test_blink_detector_set_signal_quality_scales_confidence():
+    """Quality-gated confidence: quality=1.0 → high conf, quality=0.3 → low conf."""
+    rng = np.random.default_rng(42)
+
+    # High quality run
+    det_high = BlinkDetector(classify_window_ms=100, mf_threshold=0)
+    det_high.set_signal_quality(1.0)
+    t = _establish_baseline(det_high, rng, signal_mean=0.0)
+    events1, t = _inject_blink(det_high, rng, t, signal_mean=0.0, blink_amp=-200.0)
+    events2 = _flush_classify(det_high, rng, t, signal_mean=0.0)
+    high_blinks = [e for e in events1 + events2 if "blink" in e.kind]
+    assert len(high_blinks) == 1
+    high_conf = high_blinks[0].confidence
+
+    # Low quality run
+    rng2 = np.random.default_rng(42)
+    det_low = BlinkDetector(classify_window_ms=100, mf_threshold=0)
+    det_low.set_signal_quality(0.3)
+    t = _establish_baseline(det_low, rng2, signal_mean=0.0)
+    events1, t = _inject_blink(det_low, rng2, t, signal_mean=0.0, blink_amp=-200.0)
+    events2 = _flush_classify(det_low, rng2, t, signal_mean=0.0)
+    low_blinks = [e for e in events1 + events2 if "blink" in e.kind]
+    assert len(low_blinks) == 1
+    low_conf = low_blinks[0].confidence
+
+    assert high_conf > low_conf, f"High quality conf {high_conf} should exceed low quality conf {low_conf}"
+    assert low_conf < 0.5, f"Low quality conf {low_conf} should be < 0.5"
+
+
+def test_blink_detector_set_calibrated_threshold():
+    """Calibration adjusts threshold_sd based on measured blink amplitudes."""
+    rng = np.random.default_rng(42)
+    detector = BlinkDetector(threshold_sd=4.0)
+
+    _establish_baseline(detector, rng, signal_mean=0.0)
+    original_sd = detector.threshold_sd
+
+    # Calibrate with a median peak amplitude that implies different threshold
+    detector.set_calibrated_threshold(median_peak_amplitude_uv=-80.0)
+    new_sd = detector.threshold_sd
+
+    assert new_sd != original_sd, f"Threshold should change after calibration, still {original_sd}"
+    assert new_sd >= 1.5, f"Threshold SD should be >= 1.5 floor, got {new_sd}"
+
+
 def test_blink_detector_skips_none():
     frame = PipelineFrame(eeg=None, ppg=None, imu=None, timestamp=0.0)
     BlinkDetector().process(frame)

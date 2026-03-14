@@ -14,6 +14,7 @@ export function BlinkFlash({ lastEvent }: Props) {
   useEffect(() => {
     if (!lastEvent) return;
     if (!lastEvent.kind.includes("blink")) return;
+    if ((lastEvent.confidence ?? 1) < 0.6) return;
 
     const level: FlashLevel =
       lastEvent.kind === "double_blink" ? "double" : "single";

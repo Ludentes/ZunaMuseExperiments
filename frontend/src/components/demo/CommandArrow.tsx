@@ -30,6 +30,7 @@ export function CommandArrow({ lastEvent }: Props) {
   useEffect(() => {
     if (!lastEvent) return;
     const target = TARGETS[lastEvent.kind];
+    if ((lastEvent.confidence ?? 1) < 0.6) return;
     if (!target) return;
 
     const newParticle: Particle = {

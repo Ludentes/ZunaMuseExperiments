@@ -79,7 +79,7 @@ class BandPowerBroadcaster(Stage):
         if channels:
             sample_ch = next(iter(channels))
             sample = channels[sample_ch]
-            log.info(
+            log.debug(
                 "band_powers [%s] α=%.1f θ=%.1f β=%.1f (smoothed, ema=%.1f)",
                 sample_ch,
                 sample.get("alpha", 0),
