@@ -3,12 +3,13 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 /** Protocol config per label */
 interface Protocol {
   label: string;
-  trialDuration: number;  // total trial length (seconds)
-  cueAt: number;          // when to show "GO" cue (seconds from trial start)
-  reps: number;           // number of trials
-  restBetween: number;    // rest between trials (seconds)
-  instruction: string;    // what to tell the user
-  flickerHz?: number;     // SSVEP: flicker frequency in Hz (undefined = no flicker)
+  trialDuration: number;   // total trial length (seconds)
+  cueAt: number;           // when to show "GO" cue (seconds from trial start)
+  reps: number;            // number of trials
+  restBetween: number;     // rest between trials (seconds)
+  instruction: string;     // what to tell the user
+  flickerHz?: number;      // SSVEP: flicker frequency in Hz (undefined = no flicker)
+  metronomePeriod?: number; // metronome blink mode: fire a cue every N seconds during recording
 }
 
 const PROTOCOLS: Protocol[] = [
@@ -44,6 +45,9 @@ const PROTOCOLS: Protocol[] = [
   { label: "flicker_4hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 4 },  // 4Hz: 7.5 frames/half — slight jitter but still usable
   { label: "flicker_5hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 5 },
   { label: "flicker_6hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 6 },
+  // Continuous session: metronome-prompted blinks for streaming detector evaluation
+  // 30s × 3 trials → ~30 blinks per session. metronomePeriod=3 fires at t=0,3,6,...,27s.
+  { label: "blink_continuous", trialDuration: 30, cueAt: 0, reps: 3, restBetween: 10, instruction: "Blink on each prompt", metronomePeriod: 3 },
 ];
 
 type SessionState =
@@ -212,6 +216,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const trialStartRef = useRef(0);
   const abortRef = useRef(false);
+  const lastBeatRef = useRef(-1);
 
   const protocol = PROTOCOLS[selectedIdx];
 
@@ -235,6 +240,8 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     (proto: Protocol, trialNum: number, sessionId: string): Promise<void> => {
       return new Promise((resolve) => {
         if (abortRef.current) { resolve(); return; }
+
+        lastBeatRef.current = -1; // reset beat counter for each trial
 
         // Start recording on backend
         sendCommand({
@@ -260,10 +267,19 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
 
           const elapsed = (performance.now() - trialStartRef.current) / 1000;
 
-          // Trigger cue
+          // Metronome beats (overrides single cue for metronome protocols)
+          if (proto.metronomePeriod) {
+            const beat = Math.floor(elapsed / proto.metronomePeriod);
+            if (beat > lastBeatRef.current) {
+              lastBeatRef.current = beat;
+              playBeep(660, 80);
+            }
+          }
+
+          // Trigger cue (for non-metronome protocols, or the initial start beep)
           if (!cued && elapsed >= proto.cueAt) {
             cued = true;
-            playBeep(880, 100);
+            if (!proto.metronomePeriod) playBeep(880, 100);
             setState({ phase: "recording", trialNum, elapsed, cued: true });
           } else {
             setState({ phase: "recording", trialNum, elapsed, cued });
@@ -439,24 +455,51 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
             </span>
           </div>
 
-          {/* CUE indicator — hide for long trials (>10s) after first 3 seconds to avoid distraction */}
-          {(!state.cued || state.elapsed < (protocol.cueAt + 3) || protocol.trialDuration <= 10) && (
-            <div
-              className="flex items-center justify-center py-3 rounded transition-all duration-100"
-              style={{
-                background: state.cued ? "var(--accent)" : "rgba(255,255,255,0.03)",
-                border: state.cued ? "2px solid var(--accent)" : "2px solid var(--border)",
-              }}
-            >
-              <span
-                className="text-2xl font-mono font-bold tracking-widest"
+          {/* Metronome mode: pulsing BLINK prompt every metronomePeriod seconds */}
+          {protocol.metronomePeriod ? (() => {
+            const period = protocol.metronomePeriod;
+            const beatPhase = state.elapsed % period;
+            const flashOn = beatPhase < 0.35; // flash for 350ms per beat
+            const beatsLeft = Math.floor((protocol.trialDuration - state.elapsed) / period);
+            return (
+              <div
+                className="flex flex-col items-center justify-center py-4 rounded transition-colors duration-75"
                 style={{
-                  color: state.cued ? "var(--bg-base)" : "var(--text-dim)",
+                  background: flashOn ? "var(--accent)" : "rgba(255,255,255,0.03)",
+                  border: flashOn ? "2px solid var(--accent)" : "2px solid var(--border)",
                 }}
               >
-                {state.cued ? protocol.instruction.toUpperCase() : "WAIT..."}
-              </span>
-            </div>
+                <span
+                  className="text-2xl font-mono font-bold tracking-widest"
+                  style={{ color: flashOn ? "var(--bg-base)" : "var(--text-dim)" }}
+                >
+                  {flashOn ? "BLINK ↓" : "..."}
+                </span>
+                <span className="text-[10px] font-mono mt-1" style={{ color: flashOn ? "var(--bg-base)" : "var(--text-dim)", opacity: 0.7 }}>
+                  {beatsLeft > 0 ? `~${beatsLeft} more` : "finishing..."}
+                </span>
+              </div>
+            );
+          })() : (
+            /* Normal cue indicator — hide for long trials after first 3 seconds */
+            (!state.cued || state.elapsed < (protocol.cueAt + 3) || protocol.trialDuration <= 10) && (
+              <div
+                className="flex items-center justify-center py-3 rounded transition-all duration-100"
+                style={{
+                  background: state.cued ? "var(--accent)" : "rgba(255,255,255,0.03)",
+                  border: state.cued ? "2px solid var(--accent)" : "2px solid var(--border)",
+                }}
+              >
+                <span
+                  className="text-2xl font-mono font-bold tracking-widest"
+                  style={{
+                    color: state.cued ? "var(--bg-base)" : "var(--text-dim)",
+                  }}
+                >
+                  {state.cued ? protocol.instruction.toUpperCase() : "WAIT..."}
+                </span>
+              </div>
+            )
           )}
         </div>
       )}
