@@ -170,6 +170,32 @@ class EEGServer:
                 median_peak = cmd.get("median_peak_amplitude_uv", -50.0)
                 detector.set_calibrated_threshold(median_peak)
                 log.info("Calibrate blink: median_peak=%.1f µV", median_peak)
+        elif action == "set_blink_threshold":
+            detector = self._get_blink_detector()
+            if detector:
+                threshold_sd = cmd.get("threshold_sd")
+                threshold_uv = cmd.get("threshold_uv")
+                detector.set_blink_threshold(threshold_sd=threshold_sd, threshold_uv=threshold_uv)
+        elif action == "snapshot_detector":
+            detector = self._get_blink_detector()
+            if detector:
+                robust_sd = 1.4826 * detector._baseline_mad
+                adaptive_thresh = detector._baseline_median - detector.threshold_sd * robust_sd
+                effective_thresh = max(adaptive_thresh, detector.threshold_uv) \
+                    if detector.threshold_uv > -9000 else adaptive_thresh
+                snapshot = {
+                    "baseline_median": round(detector._baseline_median, 2),
+                    "baseline_mad": round(detector._baseline_mad, 2),
+                    "robust_sd": round(robust_sd, 2),
+                    "threshold_sd": round(detector.threshold_sd, 2),
+                    "threshold_uv": round(detector.threshold_uv, 2),
+                    "adaptive_thresh": round(adaptive_thresh, 2),
+                    "effective_thresh": round(effective_thresh, 2),
+                    "baseline_samples": detector._baseline_samples,
+                    "frontal_quality": round(detector._frontal_quality, 2),
+                }
+                log.info("SNAPSHOT detector: %s", snapshot)
+                await self._broadcast_text(json.dumps({"type": "detector_snapshot", **snapshot}))
         elif action == "capture_blink_sample":
             detector = self._get_blink_detector()
             if detector:

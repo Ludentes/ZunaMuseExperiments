@@ -16,6 +16,7 @@ import { EventLog } from "../components/demo/EventLog";
 import { KioskPlayer } from "../components/demo/KioskPlayer";
 import { KioskToggle } from "../components/demo/KioskToggle";
 import { CalibrationOverlay } from "../components/demo/CalibrationOverlay";
+import { DetectorControls } from "../components/demo/DetectorControls";
 import { concentrationToHex } from "../lib/concentrationColor";
 
 export const Route = createFileRoute("/demo")({
@@ -23,7 +24,7 @@ export const Route = createFileRoute("/demo")({
 });
 
 function DemoPage() {
-  const { buffers, metricsRef, eventsRef, isConnected, sendCommand } = useSensorStream();
+  const { buffers, metricsRef, eventsRef, lastMessage, isConnected, sendCommand } = useSensorStream();
   const metrics = useMetrics(metricsRef);
   const { getBandPowers } = useBandPowers(metrics);
   const { events, lastEvent } = useEvents(eventsRef);
@@ -230,6 +231,9 @@ function DemoPage() {
 
           {/* Kiosk player */}
           <KioskPlayer lastEvent={lastEvent} />
+
+          {/* Detector controls */}
+          <DetectorControls sendCommand={sendCommand} isConnected={isConnected} lastMessage={lastMessage} />
 
           {/* Event log */}
           <div className="flex-1 min-h-0 overflow-hidden">

@@ -35,7 +35,7 @@ export function useSensorStream() {
   const eventsRef = useRef<BciEvent[]>([]);
   const [zunaStatus, setZunaStatus] = useState<ZunaStatus>({ available: false, enabled: false });
 
-  const { readyState, sendJsonMessage } = useWebSocket(WS_URL, {
+  const { readyState, sendJsonMessage, lastMessage } = useWebSocket(WS_URL, {
     onMessage: (event) => {
       if (event.data instanceof Blob) {
         // Binary frame — read into ArrayBuffer
@@ -85,6 +85,7 @@ export function useSensorStream() {
     buffers: buffersRef,
     metricsRef,
     eventsRef,
+    lastMessage,
     readyState,
     isConnected: readyState === ReadyState.OPEN,
     sendCommand,

@@ -58,30 +58,30 @@ export function CalibrationOverlay({
     [phase],
   );
 
-  // Done: send calibration command (no auto-dismiss — user closes manually)
+  // Done: send calibration command once (no auto-dismiss — user closes manually)
+  // Guard with ref to prevent double-fire from React StrictMode double-invocation.
+  const calibrationSentRef = useRef(false);
   useEffect(() => {
     if (phase !== "done") return;
+    if (calibrationSentRef.current) return;
+    calibrationSentRef.current = true;
 
-    setResults((prev) => {
-      const blinkResult = prev["blink"];
-      if (blinkResult) {
-        // Only use captures where baseline was stable — early cold-start captures
-        // have wrong baseline context and would skew the calibration.
-        const peaks = blinkResult.trials
-          .filter((t) => t.hit && t.metadata?.baseline_stable === true && t.metadata?.amplitude_uv != null)
-          .map((t) => t.metadata!.amplitude_uv as number);
-        if (peaks.length > 0) {
-          peaks.sort((a, b) => a - b);
-          const median = peaks[Math.floor(peaks.length / 2)];
-          sendCommand({ cmd: "calibrate_blink", median_peak_amplitude_uv: median });
-        } else {
-          // All captures were during cold start — skip calibration, use defaults
-          console.warn("Calibration: no stable-baseline captures available, skipping threshold adjustment");
-        }
+    const blinkResult = results["blink"];
+    if (blinkResult) {
+      // Only use captures where baseline was stable — early cold-start captures
+      // have wrong baseline context and would skew the calibration.
+      const peaks = blinkResult.trials
+        .filter((t) => t.hit && t.metadata?.baseline_stable === true && t.metadata?.amplitude_uv != null)
+        .map((t) => t.metadata!.amplitude_uv as number);
+      if (peaks.length > 0) {
+        peaks.sort((a, b) => a - b);
+        const median = peaks[Math.floor(peaks.length / 2)];
+        sendCommand({ cmd: "calibrate_blink", median_peak_amplitude_uv: median });
+      } else {
+        console.warn("Calibration: no stable-baseline captures available, skipping threshold adjustment");
       }
-      return prev;
-    });
-  }, [phase, sendCommand]);
+    }
+  }, [phase, results, sendCommand]);
 
   return (
     <div
