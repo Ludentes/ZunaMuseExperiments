@@ -11,6 +11,8 @@ interface Protocol {
   flickerHz?: number;      // SSVEP: flicker frequency in Hz (undefined = no flicker)
   metronomePeriod?: number; // metronome blink mode: fire a cue every N seconds during recording
   pvt?: boolean;           // PVT-B mode: show reaction time task during recording
+  nback?: boolean;          // N-back mode: show working memory task during recording
+  nbackN?: number;          // N for N-back (default 2)
 }
 
 const PROTOCOLS: Protocol[] = [
@@ -52,6 +54,12 @@ const PROTOCOLS: Protocol[] = [
   // Brain Fry: standalone 3-min PVT-B with EEG recording.
   // Record a few when fresh and a few when tired to build fatigue baseline.
   { label: "pvt_brainfry", trialDuration: 180, cueAt: 0, reps: 1, restBetween: 1, instruction: "Tap SPACE as fast as possible when you see the red circle", pvt: true },
+  // Brain Fry: 2-back working memory task with EEG recording.
+  // More fatigue-sensitive than PVT — accuracy degrades before reaction time.
+  { label: "nback_brainfry", trialDuration: 180, cueAt: 0, reps: 1, restBetween: 1, instruction: "Press SPACE when the digit matches the one from 2 steps ago", nback: true, nbackN: 2 },
+  // Brain Fry: 3-back with lures — harder than 2-back, better fatigue discrimination.
+  // Lures (N-1 matches) increase false alarm rate, making the task sensitive to inhibition failures.
+  { label: "nback3_brainfry", trialDuration: 180, cueAt: 0, reps: 1, restBetween: 1, instruction: "Press SPACE when the digit matches the one from 3 steps ago", nback: true, nbackN: 3 },
 ];
 
 type SessionState =
@@ -487,6 +495,294 @@ const PVTOverlay = React.memo(function PVTOverlay({
   );
 });
 
+/** N-back trial result */
+interface NBackTrial {
+  digit: number;
+  isTarget: boolean;     // true = N-back match (should press)
+  isLure: boolean;       // true = (N-1)-back match but not N-back (should NOT press)
+  responded: boolean;    // did user press space?
+  rt_ms: number;         // reaction time if responded, 0 if not
+  timestamp: number;
+}
+
+/** N-back working memory overlay.
+ * Digits appear one at a time. Press SPACE when current digit matches N steps back.
+ * Lures (N-1 back matches) increase task difficulty and false alarm sensitivity.
+ * Measures accuracy, d′, and hit RT — all degrade with fatigue. */
+const NBackOverlay = React.memo(function NBackOverlay({
+  n,
+  durationS,
+  active,
+  onComplete,
+  sharedResultsRef,
+}: {
+  n: number;
+  durationS: number;
+  active: boolean;
+  onComplete: (results: NBackTrial[]) => void;
+  sharedResultsRef: React.MutableRefObject<NBackTrial[] | null>;
+}) {
+  const STIMULUS_MS = 1500;
+  const BLANK_MS = 500;
+  const CYCLE_MS = STIMULUS_MS + BLANK_MS;
+  const TARGET_RATE = 0.25;  // 25% targets
+  const LURE_RATE = 0.15;    // 15% lures (N-1 back) — only meaningful for N>=2
+
+  const [display, setDisplay] = useState<
+    | { phase: "digit"; digit: number; isTarget: boolean; isLure: boolean; responded: boolean; feedbackColor: string | null }
+    | { phase: "blank" }
+    | { phase: "summary"; results: NBackTrial[] }
+  >({ phase: "blank" });
+
+  const resultsRef = useRef<NBackTrial[]>([]);
+  const sequenceRef = useRef<number[]>([]);
+  const indexRef = useRef(0);
+  const stimulusStartRef = useRef(0);
+  const respondedRef = useRef(false);
+  const activeRef = useRef(active);
+  const sessionStartRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  activeRef.current = active;
+
+  /** Generate sequence with targets (~25%) and lures (~15% for N>=2) */
+  const generateSequence = useCallback((totalDigits: number) => {
+    const seq: number[] = [];
+    for (let i = 0; i < totalDigits; i++) {
+      const canBeTarget = i >= n;
+      const canBeLure = n >= 2 && i >= (n - 1);
+      const r = Math.random();
+
+      if (canBeTarget && r < TARGET_RATE) {
+        // Target: match exactly N back
+        seq.push(seq[i - n]);
+      } else if (canBeLure && r < TARGET_RATE + LURE_RATE) {
+        // Lure: match N-1 back but not N back
+        const lureDigit = seq[i - (n - 1)];
+        const isAlsoTarget = canBeTarget && lureDigit === seq[i - n];
+        if (!isAlsoTarget) {
+          seq.push(lureDigit);
+        } else {
+          // Would be a target too — generate a foil instead
+          let d: number;
+          do { d = Math.floor(Math.random() * 9) + 1; }
+          while (canBeTarget && d === seq[i - n]);
+          seq.push(d);
+        }
+      } else {
+        // Foil: doesn't match N back
+        let d: number;
+        do { d = Math.floor(Math.random() * 9) + 1; }
+        while (canBeTarget && d === seq[i - n]);
+        seq.push(d);
+      }
+    }
+    return seq;
+  }, [n]);
+
+  /** Push a result and sync to parent */
+  const pushResult = useCallback((r: NBackTrial) => {
+    resultsRef.current.push(r);
+    sharedResultsRef.current = [...resultsRef.current];
+  }, [sharedResultsRef]);
+
+  /** Show next digit or end */
+  const showNext = useCallback(() => {
+    if (!activeRef.current) return;
+
+    const idx = indexRef.current;
+    const seq = sequenceRef.current;
+
+    if (idx >= seq.length) {
+      const results = resultsRef.current;
+      setDisplay({ phase: "summary", results });
+      onComplete(results);
+      return;
+    }
+
+    const digit = seq[idx];
+    const isTarget = idx >= n && digit === seq[idx - n];
+    const isLure = !isTarget && n >= 2 && idx >= (n - 1) && digit === seq[idx - (n - 1)];
+    respondedRef.current = false;
+    stimulusStartRef.current = performance.now();
+
+    playBeep(600, 30);
+    setDisplay({ phase: "digit", digit, isTarget, isLure, responded: false, feedbackColor: null });
+
+    timerRef.current = setTimeout(() => {
+      if (!activeRef.current) return;
+
+      if (!respondedRef.current) {
+        pushResult({ digit, isTarget, isLure, responded: false, rt_ms: 0, timestamp: stimulusStartRef.current });
+        if (isTarget) {
+          setDisplay({ phase: "digit", digit, isTarget, isLure, responded: false, feedbackColor: "#ef4444" });
+        }
+      }
+
+      timerRef.current = setTimeout(() => {
+        if (!activeRef.current) return;
+        setDisplay({ phase: "blank" });
+        indexRef.current++;
+        timerRef.current = setTimeout(() => showNext(), 50);
+      }, BLANK_MS);
+    }, STIMULUS_MS);
+  }, [n, onComplete, pushResult]);
+
+  // Start session
+  useEffect(() => {
+    if (!active) {
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+      return;
+    }
+    const totalDigits = Math.floor(durationS * 1000 / CYCLE_MS);
+    sequenceRef.current = generateSequence(totalDigits);
+    indexRef.current = 0;
+    resultsRef.current = [];
+    sharedResultsRef.current = [];
+    sessionStartRef.current = performance.now();
+    timerRef.current = setTimeout(() => showNext(), 500);
+    return () => {
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    };
+  }, [active, durationS, generateSequence, showNext, sharedResultsRef]);
+
+  // Handle spacebar
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: KeyboardEvent | MouseEvent) => {
+      if (e instanceof KeyboardEvent && e.key !== " ") return;
+      if (e instanceof KeyboardEvent) e.preventDefault();
+      if (display.phase !== "digit" || respondedRef.current) return;
+
+      respondedRef.current = true;
+      const rt = performance.now() - stimulusStartRef.current;
+      pushResult({ digit: display.digit, isTarget: display.isTarget, isLure: display.isLure, responded: true, rt_ms: rt, timestamp: stimulusStartRef.current });
+      const color = display.isTarget ? "#4ade80" : "#facc15";
+      setDisplay(prev => prev.phase === "digit" ? { ...prev, responded: true, feedbackColor: color } : prev);
+    };
+    window.addEventListener("keydown", handler);
+    window.addEventListener("mousedown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      window.removeEventListener("mousedown", handler);
+    };
+  }, [active, display, pushResult]);
+
+  if (!active) return null;
+
+  const elapsed = (performance.now() - sessionStartRef.current) / 1000;
+  const remaining = Math.max(0, durationS - elapsed);
+  const hits = resultsRef.current.filter(r => r.isTarget && r.responded).length;
+  const misses = resultsRef.current.filter(r => r.isTarget && !r.responded).length;
+  const falseAlarms = resultsRef.current.filter(r => !r.isTarget && r.responded).length;
+  const total = resultsRef.current.length;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      background: "#111", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      fontFamily: "monospace", color: "#fff",
+    }}>
+      {/* Timer bar */}
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 4, background: "rgba(255,255,255,0.1)" }}>
+        <div style={{ height: "100%", background: "#818cf8", width: `${(1 - remaining / durationS) * 100}%`, transition: "width 0.5s linear" }} />
+      </div>
+
+      {/* Stats bar */}
+      <div style={{
+        position: "absolute", top: 12, left: 20, right: 20,
+        display: "flex", justifyContent: "space-between",
+        fontSize: 12, color: "rgba(255,255,255,0.4)",
+      }}>
+        <span>{n}-back · {Math.floor(remaining / 60)}:{String(Math.floor(remaining % 60)).padStart(2, "0")} remaining</span>
+        <span>{hits} hits · {misses} miss · {falseAlarms} false alarm · {total} total</span>
+      </div>
+
+      {/* History hint — show last N digits faintly, target position highlighted */}
+      <div style={{ position: "absolute", top: 60, display: "flex", gap: 24, alignItems: "flex-end" }}>
+        {Array.from({ length: n }).map((_, i) => {
+          const histIdx = indexRef.current - (n - i);
+          const isTargetPos = i === 0; // leftmost = N-back position
+          return histIdx >= 0 ? (
+            <span key={i} style={{
+              fontSize: isTargetPos ? 36 : 24,
+              color: isTargetPos ? "rgba(129,140,248,0.25)" : "rgba(255,255,255,0.1)",
+              fontWeight: "bold",
+            }}>
+              {sequenceRef.current[histIdx]}
+            </span>
+          ) : <span key={i} style={{ fontSize: 24, color: "transparent" }}>·</span>;
+        })}
+      </div>
+
+      {/* Main content */}
+      {display.phase === "blank" && (
+        <div style={{ fontSize: 72, color: "rgba(255,255,255,0.08)", userSelect: "none" }}>·</div>
+      )}
+
+      {display.phase === "digit" && (
+        <div style={{
+          fontSize: 160, fontWeight: "bold", userSelect: "none",
+          color: display.feedbackColor ?? "#fff",
+          textShadow: display.isTarget && display.responded && display.feedbackColor === "#4ade80"
+            ? "0 0 40px rgba(74,222,128,0.5)" : "none",
+          transition: "color 0.1s",
+        }}>
+          {display.digit}
+        </div>
+      )}
+
+      {display.phase === "summary" && (() => {
+        const s = display.results;
+        const sHits = s.filter(r => r.isTarget && r.responded);
+        const sMisses = s.filter(r => r.isTarget && !r.responded).length;
+        const sFalse = s.filter(r => !r.isTarget && r.responded).length;
+        const sLureFalse = s.filter(r => r.isLure && r.responded).length;
+        const sCorrect = s.filter(r => !r.isTarget && !r.responded).length;
+        const sTargets = s.filter(r => r.isTarget).length;
+        const hitRate = sTargets > 0 ? sHits.length / sTargets : 0;
+        const hitRTs = sHits.map(r => r.rt_ms);
+        const meanHitRT = hitRTs.length > 0 ? hitRTs.reduce((a, b) => a + b, 0) / hitRTs.length : 0;
+        const accuracy = s.length > 0 ? (sHits.length + sCorrect) / s.length : 0;
+        const faRate = (s.length - sTargets) > 0 ? sFalse / (s.length - sTargets) : 0;
+        const clamp = (v: number) => Math.max(0.01, Math.min(0.99, v));
+        const zScore = (p: number) => {
+          const a = 0.147;
+          const sign = p < 0.5 ? -1 : 1;
+          const ln = Math.log(1 - (2 * p - 1) ** 2);
+          return sign * Math.sqrt(Math.sqrt((2 / (Math.PI * a) + ln / 2) ** 2 - ln / a) - (2 / (Math.PI * a) + ln / 2));
+        };
+        const dprime = zScore(clamp(hitRate)) - zScore(clamp(faRate));
+
+        return (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, color: "rgba(255,255,255,0.5)", marginBottom: 16 }}>{n}-BACK COMPLETE</div>
+            <div style={{ fontSize: 48, fontWeight: "bold", color: "#818cf8" }}>{(accuracy * 100).toFixed(0)}%</div>
+            <div style={{ fontSize: 14, color: "rgba(255,255,255,0.4)", marginTop: 4 }}>accuracy</div>
+            <div style={{ display: "flex", gap: 24, marginTop: 24, fontSize: 14, flexWrap: "wrap", justifyContent: "center" }}>
+              <div><span style={{ color: "#4ade80" }}>{sHits.length}</span>/{sTargets} hits</div>
+              <div><span style={{ color: sMisses > 0 ? "#ef4444" : "#4ade80" }}>{sMisses}</span> misses</div>
+              <div><span style={{ color: sFalse > 0 ? "#facc15" : "#4ade80" }}>{sFalse}</span> FA {sLureFalse > 0 && <span style={{ color: "rgba(255,255,255,0.4)" }}>({sLureFalse} lure)</span>}</div>
+              <div><span style={{ color: "#818cf8" }}>{dprime.toFixed(2)}</span> d′</div>
+              <div><span style={{ color: "#fff" }}>{meanHitRT > 0 ? Math.round(meanHitRT) + "ms" : "—"}</span> hit RT</div>
+              <div><span style={{ color: "#fff" }}>{s.length}</span> trials</div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Instructions */}
+      <div style={{
+        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
+        fontSize: 12, color: "rgba(255,255,255,0.3)", textAlign: "center",
+      }}>
+        Press SPACE when digit matches {n} steps ago — press ESC to abort
+      </div>
+    </div>
+  );
+});
+
 /** Shared AudioContext — reused across all beeps to avoid browser context limits */
 let sharedAudioCtx: AudioContext | null = null;
 function getAudioCtx(): AudioContext {
@@ -519,9 +815,11 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
   const [state, setState] = useState<SessionState>({ phase: "idle" });
   const [discardedCount, setDiscardedCount] = useState(0);
   const [pvtActive, setPvtActive] = useState(false);
+  const [nbackActive, setNbackActive] = useState(false);
   const [pvtNote, setPvtNote] = useState("");
   const pvtNoteRef = useRef("");
   const pvtResultsRef = useRef<PVTResponse[] | null>(null);
+  const nbackResultsRef = useRef<NBackTrial[] | null>(null);
   const pvtResolveRef = useRef<(() => void) | null>(null);
   const skipRestRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -543,13 +841,19 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     abortRef.current = true;
     cleanup();
     sendCommand({ cmd: "stop_recording" });
+    setPvtActive(false);
+    setNbackActive(false);
     setState({ phase: "idle" });
   }, [cleanup, sendCommand]);
 
   // Handle PVT completion
   const handlePvtComplete = useCallback((results: PVTResponse[]) => {
     pvtResultsRef.current = results;
-    // PVT overlay done — resolve will happen when timer finishes
+  }, []);
+
+  // Handle N-back completion
+  const handleNbackComplete = useCallback((results: NBackTrial[]) => {
+    nbackResultsRef.current = results;
   }, []);
 
   // Run one trial
@@ -560,6 +864,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
 
         lastBeatRef.current = -1; // reset beat counter for each trial
         pvtResultsRef.current = null;
+        nbackResultsRef.current = null;
 
         // Start recording on backend
         sendCommand({
@@ -579,6 +884,10 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           setPvtActive(true);
           pvtResolveRef.current = resolve;
         }
+        // N-back mode: activate overlay
+        if (proto.nback) {
+          setNbackActive(true);
+        }
 
         setState({ phase: "recording", trialNum, elapsed: 0, cued: false });
 
@@ -586,6 +895,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           if (abortRef.current) {
             cleanup();
             if (proto.pvt) setPvtActive(false);
+            if (proto.nback) setNbackActive(false);
             resolve();
             return;
           }
@@ -607,7 +917,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           // Trigger cue (for non-metronome protocols, or the initial start beep)
           if (!cued && elapsed >= proto.cueAt) {
             cued = true;
-            if (!proto.metronomePeriod && !proto.pvt) playBeep(880, 100);
+            if (!proto.metronomePeriod && !proto.pvt && !proto.nback) playBeep(880, 100);
             setState({ phase: "recording", trialNum, elapsed, cued: true });
           } else {
             setState({ phase: "recording", trialNum, elapsed, cued });
@@ -636,6 +946,43 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
                     lapses: responses.filter(r => r.rt_ms === -1).length,
                     false_starts: responses.filter(r => r.rt_ms === -2).length,
                     n_valid: rts.length,
+                    ...(pvtNoteRef.current.trim() && { note: pvtNoteRef.current.trim() }),
+                  },
+                });
+              }
+            }
+            if (proto.nback) {
+              setNbackActive(false);
+              // Send N-back results to backend
+              const trials = nbackResultsRef.current ?? [];
+              if (trials.length > 0) {
+                const hits = trials.filter(r => r.isTarget && r.responded);
+                const misses = trials.filter(r => r.isTarget && !r.responded).length;
+                const falseAlarms = trials.filter(r => !r.isTarget && r.responded).length;
+                const correctRej = trials.filter(r => !r.isTarget && !r.responded).length;
+                const targets = trials.filter(r => r.isTarget).length;
+                const hitRTs = hits.map(r => r.rt_ms);
+                const accuracy = (hits.length + correctRej) / trials.length;
+                sendCommand({
+                  cmd: "save_pvt_results",
+                  label: proto.label,
+                  session_id: sessionId,
+                  trial_num: trialNum,
+                  results: {
+                    task: `${proto.nbackN ?? 2}-back`,
+                    n: proto.nbackN ?? 2,
+                    trials,
+                    accuracy,
+                    hits: hits.length,
+                    misses,
+                    false_alarms: falseAlarms,
+                    lure_false_alarms: trials.filter(r => r.isLure && r.responded).length,
+                    correct_rejections: correctRej,
+                    targets,
+                    lures: trials.filter(r => r.isLure).length,
+                    hit_rate: targets > 0 ? hits.length / targets : 0,
+                    mean_hit_rt: hitRTs.length > 0 ? hitRTs.reduce((a, b) => a + b, 0) / hitRTs.length : 0,
+                    n_trials: trials.length,
                     ...(pvtNoteRef.current.trim() && { note: pvtNoteRef.current.trim() }),
                   },
                 });
@@ -742,18 +1089,22 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
   // PVT overlay state
   const showPvt = pvtActive && !!protocol.pvt;
 
-  // ESC key to abort during SSVEP or PVT
+  // N-back overlay state
+  const showNback = nbackActive && !!protocol.nback;
+
+  // ESC key to abort during SSVEP, PVT, or N-back
   useEffect(() => {
-    if (!showFlicker && !showPvt) return;
+    if (!showFlicker && !showPvt && !showNback) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (showPvt) setPvtActive(false);
+        if (showNback) setNbackActive(false);
         stopSession();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [showFlicker, showPvt, stopSession]);
+  }, [showFlicker, showPvt, showNback, stopSession]);
 
   return (
     <div
@@ -798,8 +1149,8 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
         </div>
       )}
 
-      {/* PVT session note */}
-      {state.phase === "idle" && protocol.pvt && (
+      {/* Brain Fry session note (PVT or N-back) */}
+      {state.phase === "idle" && (protocol.pvt || protocol.nback) && (
         <div className="mb-3">
           <input
             type="text"
@@ -1012,6 +1363,17 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           active={showPvt}
           onComplete={handlePvtComplete}
           sharedResultsRef={pvtResultsRef}
+        />
+      )}
+
+      {/* N-back overlay */}
+      {protocol.nback && (
+        <NBackOverlay
+          n={protocol.nbackN ?? 2}
+          durationS={protocol.trialDuration}
+          active={showNback}
+          onComplete={handleNbackComplete}
+          sharedResultsRef={nbackResultsRef}
         />
       )}
     </div>
