@@ -263,6 +263,24 @@ class EEGServer:
                     "filepath": str(filepath),
                     "markers": len(self._blink_markers),
                 }))
+        elif action == "save_pvt_results":
+            label = cmd.get("label", "pvt")
+            session_id = cmd.get("session_id", "")
+            trial_num = cmd.get("trial_num", 0)
+            results = cmd.get("results", {})
+            # Save PVT results as JSON alongside EEG recordings
+            if session_id:
+                pvt_dir = Path(self.config.server.recording_dir) / label / session_id
+            else:
+                pvt_dir = Path(self.config.server.recording_dir) / label
+            pvt_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            pvt_path = pvt_dir / f"pvt_t{trial_num:02d}_{ts}.json"
+            import json as json_mod
+            with open(pvt_path, "w") as f:
+                json_mod.dump(results, f, indent=2)
+            log.info("PVT results saved — %s (mean_rt=%.0fms, lapses=%d)",
+                     pvt_path, results.get("mean_rt", 0), results.get("lapses", 0))
         elif action == "discard_last_recording":
             path = getattr(self, '_last_saved_path', None)
             if path and Path(path).exists():

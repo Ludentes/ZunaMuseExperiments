@@ -10,16 +10,17 @@ interface Protocol {
   instruction: string;     // what to tell the user
   flickerHz?: number;      // SSVEP: flicker frequency in Hz (undefined = no flicker)
   metronomePeriod?: number; // metronome blink mode: fire a cue every N seconds during recording
+  pvt?: boolean;           // PVT-B mode: show reaction time task during recording
 }
 
 const PROTOCOLS: Protocol[] = [
   { label: "baseline",     trialDuration: 60, cueAt: 0,  reps: 30, restBetween: 1, instruction: "Work normally — 30min continuous capture" },
   { label: "rest",         trialDuration: 5, cueAt: 0,   reps: 5,  restBetween: 2, instruction: "Relax, do nothing" },
-  { label: "single_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Blink once at the cue" },
-  { label: "double_blink", trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Double blink at the cue" },
-  { label: "clench",       trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Clench jaw briefly at the cue" },
-  { label: "eyebrow_raise",trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Raise both eyebrows at the cue" },
-  { label: "eyebrow_furrow",trialDuration: 3, cueAt: 1,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
+  { label: "single_blink", trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Blink once at the cue" },
+  { label: "double_blink", trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Double blink at the cue" },
+  { label: "clench",       trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Clench jaw briefly at the cue" },
+  { label: "eyebrow_raise",trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Raise both eyebrows at the cue" },
+  { label: "eyebrow_furrow",trialDuration: 5, cueAt: 2,  reps: 20, restBetween: 2, instruction: "Furrow/scrunch eyebrows at the cue" },
   { label: "talk",         trialDuration: 5, cueAt: 0.5, reps: 10, restBetween: 2, instruction: "Say any word at the cue" },
   { label: "eyes_closed",  trialDuration: 30, cueAt: 0,  reps: 3,  restBetween: 5, instruction: "Close eyes, relax — keep still" },
   { label: "eyes_closed_tight", trialDuration: 30, cueAt: 0, reps: 5, restBetween: 5, instruction: "Close eyes TIGHTLY, squeeze — maximize alpha blocking" },
@@ -37,8 +38,8 @@ const PROTOCOLS: Protocol[] = [
   { label: "drowsy",       trialDuration: 60, cueAt: 0,  reps: 3,  restBetween: 10, instruction: "Eyes closed, let your mind wander — don't try to focus" },
   { label: "mentally_fatigued", trialDuration: 60, cueAt: 0, reps: 3, restBetween: 10, instruction: "Record as-is when feeling mentally tired — eyes open, normal posture" },
   // IMU / head gesture protocols
-  { label: "nod_yes",       trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Nod head YES once at the cue (chin down then up)" },
-  { label: "nod_no",        trialDuration: 3, cueAt: 1,   reps: 20, restBetween: 2, instruction: "Shake head NO once at the cue (left-right)" },
+  { label: "nod_yes",       trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Nod head YES once at the cue (chin down then up)" },
+  { label: "nod_no",        trialDuration: 5, cueAt: 2,   reps: 20, restBetween: 2, instruction: "Shake head NO once at the cue (left-right)" },
   { label: "head_still",    trialDuration: 5, cueAt: 0,   reps: 10, restBetween: 2, instruction: "Keep head completely still — control baseline" },
   // Experiment D: Low-frequency photic driving validation
   { label: "flicker_3hz",  trialDuration: 15, cueAt: 1,  reps: 10, restBetween: 5, instruction: "Stare at the flickering pattern", flickerHz: 3 },
@@ -48,6 +49,9 @@ const PROTOCOLS: Protocol[] = [
   // Continuous session: metronome-prompted blinks for streaming detector evaluation
   // 32s × 3 trials. 2s warmup, then beats at t=2,5,8,...,29s = 10 blinks per trial.
   { label: "blink_continuous", trialDuration: 32, cueAt: 2, reps: 3, restBetween: 10, instruction: "Blink on each prompt (2s warmup)", metronomePeriod: 3 },
+  // Brain Fry: standalone 3-min PVT-B with EEG recording.
+  // Record a few when fresh and a few when tired to build fatigue baseline.
+  { label: "pvt_brainfry", trialDuration: 180, cueAt: 0, reps: 1, restBetween: 1, instruction: "Tap SPACE as fast as possible when you see the red circle", pvt: true },
 ];
 
 type SessionState =
@@ -191,10 +195,312 @@ const SSVEPFlicker = React.memo(function SSVEPFlicker({ hz, active }: { hz: numb
   );
 });
 
+/** Play a loud ascending alarm to get user's attention from another tab/window.
+ * Three ascending tone triplets: 440→660→880, repeated 3 times with gaps. */
+function playAlertSound() {
+  try {
+    const ctx = getAudioCtx();
+    if (ctx.state === "suspended") ctx.resume();
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    gain.gain.value = 0.6; // louder than normal beeps
+
+    const tones = [440, 660, 880, 440, 660, 880, 440, 660, 880];
+    const durations = [0.15, 0.15, 0.25, 0.15, 0.15, 0.25, 0.15, 0.15, 0.4];
+    let t = ctx.currentTime;
+    for (let i = 0; i < tones.length; i++) {
+      const osc = ctx.createOscillator();
+      osc.connect(gain);
+      osc.frequency.value = tones[i];
+      osc.start(t);
+      osc.stop(t + durations[i]);
+      t += durations[i] + 0.05;
+    }
+  } catch (e) { console.warn("playAlertSound failed:", e); }
+}
+
+/** PVT result for a single stimulus */
+interface PVTResponse {
+  interval_ms: number;  // how long user waited before stimulus
+  rt_ms: number;        // reaction time (-1 = lapse/timeout, -2 = false start)
+  timestamp: number;    // performance.now() of stimulus
+}
+
+/** PVT-B (Brief Psychomotor Vigilance Task) overlay.
+ * Shows fixation cross, then after random 2-10s interval shows a red target.
+ * User presses Space/clicks as fast as possible. Measures reaction time.
+ * Runs for `durationS` seconds, then calls `onComplete` with results.
+ * Also writes each response to `sharedResultsRef` so the parent can read
+ * accumulated results even if the overlay hasn't finished yet. */
+const PVTOverlay = React.memo(function PVTOverlay({
+  durationS,
+  active,
+  onComplete,
+  sharedResultsRef,
+}: {
+  durationS: number;
+  active: boolean;
+  onComplete: (results: PVTResponse[]) => void;
+  sharedResultsRef: React.MutableRefObject<PVTResponse[] | null>;
+}) {
+  const [pvtState, setPvtState] = useState<
+    | { phase: "waiting"; countdown: number }
+    | { phase: "stimulus"; startedAt: number }
+    | { phase: "feedback"; rt: number }
+    | { phase: "too_early" }
+    | { phase: "summary"; results: PVTResponse[] }
+  >({ phase: "waiting", countdown: 0 });
+
+  const resultsRef = useRef<PVTResponse[]>([]);
+  const stimulusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionStartRef = useRef(0);
+  const stimulusStartRef = useRef(0);
+  const currentIntervalRef = useRef(0);
+  const activeRef = useRef(active);
+  const elapsedRef = useRef(0);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  activeRef.current = active;
+
+  /** Push a response and sync to parent ref */
+  const pushResult = useCallback((r: PVTResponse) => {
+    resultsRef.current.push(r);
+    sharedResultsRef.current = [...resultsRef.current];
+  }, [sharedResultsRef]);
+
+  const clearTimers = useCallback(() => {
+    if (stimulusTimerRef.current) { clearTimeout(stimulusTimerRef.current); stimulusTimerRef.current = null; }
+    if (feedbackTimerRef.current) { clearTimeout(feedbackTimerRef.current); feedbackTimerRef.current = null; }
+    if (elapsedTimerRef.current) { clearInterval(elapsedTimerRef.current); elapsedTimerRef.current = null; }
+  }, []);
+
+  const scheduleNextStimulus = useCallback(() => {
+    if (!activeRef.current) return;
+    const remaining = durationS - (performance.now() - sessionStartRef.current) / 1000;
+    if (remaining < 2) {
+      // Session ending — show summary
+      const results = resultsRef.current;
+      setPvtState({ phase: "summary", results });
+      onComplete(results);
+      return;
+    }
+    // Random interval 2-10s (clamp to remaining time)
+    const interval = Math.min(2000 + Math.random() * 8000, remaining * 1000 - 500);
+    currentIntervalRef.current = interval;
+    setPvtState({ phase: "waiting", countdown: Math.ceil(interval / 1000) });
+
+    stimulusTimerRef.current = setTimeout(() => {
+      if (!activeRef.current) return;
+      stimulusStartRef.current = performance.now();
+      setPvtState({ phase: "stimulus", startedAt: stimulusStartRef.current });
+      playBeep(1200, 50); // short high pip when stimulus appears
+
+      // Auto-timeout after 3s (lapse)
+      feedbackTimerRef.current = setTimeout(() => {
+        if (!activeRef.current) return;
+        pushResult({
+          interval_ms: currentIntervalRef.current,
+          rt_ms: -1, // lapse
+          timestamp: stimulusStartRef.current,
+        });
+        setPvtState({ phase: "feedback", rt: -1 });
+        feedbackTimerRef.current = setTimeout(() => scheduleNextStimulus(), 800);
+      }, 3000);
+    }, interval);
+  }, [durationS, onComplete, pushResult]);
+
+  // Start PVT session
+  useEffect(() => {
+    if (!active) {
+      clearTimers();
+      return;
+    }
+    resultsRef.current = [];
+    sharedResultsRef.current = [];
+    sessionStartRef.current = performance.now();
+    elapsedRef.current = 0;
+    // Update elapsed every 500ms for display
+    elapsedTimerRef.current = setInterval(() => {
+      elapsedRef.current = (performance.now() - sessionStartRef.current) / 1000;
+    }, 500);
+    scheduleNextStimulus();
+    return clearTimers;
+  }, [active, scheduleNextStimulus, clearTimers]);
+
+  // Handle spacebar/click response
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: KeyboardEvent | MouseEvent) => {
+      if (e instanceof KeyboardEvent && e.key !== " ") return;
+      if (e instanceof KeyboardEvent) e.preventDefault();
+
+      if (pvtState.phase === "stimulus") {
+        // Valid response
+        const rt = performance.now() - stimulusStartRef.current;
+        if (feedbackTimerRef.current) { clearTimeout(feedbackTimerRef.current); feedbackTimerRef.current = null; }
+        pushResult({
+          interval_ms: currentIntervalRef.current,
+          rt_ms: rt,
+          timestamp: stimulusStartRef.current,
+        });
+        setPvtState({ phase: "feedback", rt });
+        feedbackTimerRef.current = setTimeout(() => scheduleNextStimulus(), 800);
+      } else if (pvtState.phase === "waiting") {
+        // False start
+        if (stimulusTimerRef.current) { clearTimeout(stimulusTimerRef.current); stimulusTimerRef.current = null; }
+        pushResult({
+          interval_ms: currentIntervalRef.current,
+          rt_ms: -2, // false start
+          timestamp: performance.now(),
+        });
+        setPvtState({ phase: "too_early" });
+        feedbackTimerRef.current = setTimeout(() => scheduleNextStimulus(), 1200);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    window.addEventListener("mousedown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      window.removeEventListener("mousedown", handler);
+    };
+  }, [active, pvtState.phase, scheduleNextStimulus]);
+
+  if (!active) return null;
+
+  const elapsed = (performance.now() - sessionStartRef.current) / 1000;
+  const remaining = Math.max(0, durationS - elapsed);
+  const validRTs = resultsRef.current.filter(r => r.rt_ms > 0);
+  const lapses = resultsRef.current.filter(r => r.rt_ms === -1).length;
+  const falseStarts = resultsRef.current.filter(r => r.rt_ms === -2).length;
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 9999,
+        background: "#111", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+        fontFamily: "monospace", color: "#fff",
+        cursor: pvtState.phase === "stimulus" ? "pointer" : "default",
+      }}
+      onClick={() => {
+        // Forward clicks to mousedown handler
+      }}
+    >
+      {/* Timer bar */}
+      <div style={{
+        position: "absolute", top: 0, left: 0, right: 0, height: 4,
+        background: "rgba(255,255,255,0.1)",
+      }}>
+        <div style={{
+          height: "100%", background: "#4ade80",
+          width: `${(1 - remaining / durationS) * 100}%`,
+          transition: "width 0.5s linear",
+        }} />
+      </div>
+
+      {/* Stats bar */}
+      <div style={{
+        position: "absolute", top: 12, left: 20, right: 20,
+        display: "flex", justifyContent: "space-between",
+        fontSize: 12, color: "rgba(255,255,255,0.4)",
+      }}>
+        <span>{Math.floor(remaining / 60)}:{String(Math.floor(remaining % 60)).padStart(2, "0")} remaining</span>
+        <span>{validRTs.length} responses · {lapses} lapses · {falseStarts} false starts</span>
+      </div>
+
+      {/* Main content */}
+      {pvtState.phase === "waiting" && (
+        <div style={{ fontSize: 72, color: "rgba(255,255,255,0.15)", userSelect: "none" }}>+</div>
+      )}
+
+      {pvtState.phase === "stimulus" && (
+        <div style={{
+          width: 120, height: 120, borderRadius: "50%",
+          background: "#ef4444", boxShadow: "0 0 60px rgba(239,68,68,0.5)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 14, color: "#fff", fontWeight: "bold",
+          cursor: "pointer",
+        }}>
+          TAP!
+        </div>
+      )}
+
+      {pvtState.phase === "feedback" && (
+        <div style={{ textAlign: "center" }}>
+          {pvtState.rt > 0 ? (
+            <>
+              <div style={{
+                fontSize: 64, fontWeight: "bold",
+                color: pvtState.rt < 300 ? "#4ade80" : pvtState.rt < 500 ? "#facc15" : "#ef4444",
+              }}>
+                {Math.round(pvtState.rt)} ms
+              </div>
+              <div style={{ fontSize: 14, color: "rgba(255,255,255,0.4)", marginTop: 8 }}>
+                {pvtState.rt < 250 ? "Excellent" : pvtState.rt < 350 ? "Good" : pvtState.rt < 500 ? "Slow" : "Very slow"}
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 32, color: "#ef4444" }}>LAPSE (no response)</div>
+          )}
+        </div>
+      )}
+
+      {pvtState.phase === "too_early" && (
+        <div style={{ fontSize: 24, color: "#facc15", textAlign: "center" }}>
+          TOO EARLY!<br />
+          <span style={{ fontSize: 14, color: "rgba(255,255,255,0.4)" }}>Wait for the red circle</span>
+        </div>
+      )}
+
+      {pvtState.phase === "summary" && (() => {
+        const rts = pvtState.results.filter(r => r.rt_ms > 0).map(r => r.rt_ms);
+        const meanRT = rts.length > 0 ? rts.reduce((a, b) => a + b, 0) / rts.length : 0;
+        const medianRT = rts.length > 0 ? [...rts].sort((a, b) => a - b)[Math.floor(rts.length / 2)] : 0;
+        const fastestRT = rts.length > 0 ? Math.min(...rts) : 0;
+        const totalLapses = pvtState.results.filter(r => r.rt_ms === -1).length;
+        const totalFalse = pvtState.results.filter(r => r.rt_ms === -2).length;
+        return (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, color: "rgba(255,255,255,0.5)", marginBottom: 16 }}>PVT-B COMPLETE</div>
+            <div style={{ fontSize: 48, fontWeight: "bold", color: "#4ade80" }}>{Math.round(medianRT)} ms</div>
+            <div style={{ fontSize: 14, color: "rgba(255,255,255,0.4)", marginTop: 4 }}>median reaction time</div>
+            <div style={{ display: "flex", gap: 32, marginTop: 24, fontSize: 14 }}>
+              <div><span style={{ color: "#4ade80" }}>{Math.round(meanRT)}</span> mean</div>
+              <div><span style={{ color: "#4ade80" }}>{Math.round(fastestRT)}</span> fastest</div>
+              <div><span style={{ color: totalLapses > 0 ? "#ef4444" : "#4ade80" }}>{totalLapses}</span> lapses</div>
+              <div><span style={{ color: totalFalse > 0 ? "#facc15" : "#4ade80" }}>{totalFalse}</span> false starts</div>
+              <div><span style={{ color: "#fff" }}>{rts.length}</span> trials</div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Instructions */}
+      <div style={{
+        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
+        fontSize: 12, color: "rgba(255,255,255,0.3)", textAlign: "center",
+      }}>
+        Press SPACE or click when you see the red circle — press ESC to abort
+      </div>
+    </div>
+  );
+});
+
+/** Shared AudioContext — reused across all beeps to avoid browser context limits */
+let sharedAudioCtx: AudioContext | null = null;
+function getAudioCtx(): AudioContext {
+  if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+    sharedAudioCtx = new AudioContext();
+  }
+  return sharedAudioCtx;
+}
+
 /** Play a short beep via Web Audio API */
 function playBeep(freq: number = 880, durationMs: number = 100) {
   try {
-    const ctx = new AudioContext();
+    const ctx = getAudioCtx();
+    if (ctx.state === "suspended") ctx.resume();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
@@ -203,9 +509,8 @@ function playBeep(freq: number = 880, durationMs: number = 100) {
     gain.gain.value = 0.3;
     osc.start();
     osc.stop(ctx.currentTime + durationMs / 1000);
-    setTimeout(() => ctx.close(), durationMs + 100);
-  } catch {
-    // Audio not available
+  } catch (e) {
+    console.warn("playBeep failed:", e);
   }
 }
 
@@ -213,6 +518,12 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [state, setState] = useState<SessionState>({ phase: "idle" });
   const [discardedCount, setDiscardedCount] = useState(0);
+  const [pvtActive, setPvtActive] = useState(false);
+  const [pvtNote, setPvtNote] = useState("");
+  const pvtNoteRef = useRef("");
+  const pvtResultsRef = useRef<PVTResponse[] | null>(null);
+  const pvtResolveRef = useRef<(() => void) | null>(null);
+  const skipRestRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const trialStartRef = useRef(0);
   const abortRef = useRef(false);
@@ -235,6 +546,12 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     setState({ phase: "idle" });
   }, [cleanup, sendCommand]);
 
+  // Handle PVT completion
+  const handlePvtComplete = useCallback((results: PVTResponse[]) => {
+    pvtResultsRef.current = results;
+    // PVT overlay done — resolve will happen when timer finishes
+  }, []);
+
   // Run one trial
   const runTrial = useCallback(
     (proto: Protocol, trialNum: number, sessionId: string): Promise<void> => {
@@ -242,6 +559,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
         if (abortRef.current) { resolve(); return; }
 
         lastBeatRef.current = -1; // reset beat counter for each trial
+        pvtResultsRef.current = null;
 
         // Start recording on backend
         sendCommand({
@@ -256,11 +574,18 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
         trialStartRef.current = performance.now();
         let cued = false;
 
+        // PVT mode: activate overlay
+        if (proto.pvt) {
+          setPvtActive(true);
+          pvtResolveRef.current = resolve;
+        }
+
         setState({ phase: "recording", trialNum, elapsed: 0, cued: false });
 
         timerRef.current = setInterval(() => {
           if (abortRef.current) {
             cleanup();
+            if (proto.pvt) setPvtActive(false);
             resolve();
             return;
           }
@@ -282,7 +607,7 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           // Trigger cue (for non-metronome protocols, or the initial start beep)
           if (!cued && elapsed >= proto.cueAt) {
             cued = true;
-            if (!proto.metronomePeriod) playBeep(880, 100);
+            if (!proto.metronomePeriod && !proto.pvt) playBeep(880, 100);
             setState({ phase: "recording", trialNum, elapsed, cued: true });
           } else {
             setState({ phase: "recording", trialNum, elapsed, cued });
@@ -292,6 +617,30 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           if (elapsed >= proto.trialDuration) {
             cleanup();
             sendCommand({ cmd: "stop_recording" });
+            if (proto.pvt) {
+              setPvtActive(false);
+              // Send PVT results to backend (sharedResultsRef is populated incrementally)
+              const responses = pvtResultsRef.current ?? [];
+              if (responses.length > 0) {
+                const rts = responses.filter(r => r.rt_ms > 0).map(r => r.rt_ms);
+                sendCommand({
+                  cmd: "save_pvt_results",
+                  label: proto.label,
+                  session_id: sessionId,
+                  trial_num: trialNum,
+                  results: {
+                    responses,
+                    mean_rt: rts.length > 0 ? rts.reduce((a, b) => a + b, 0) / rts.length : 0,
+                    median_rt: rts.length > 0 ? [...rts].sort((a, b) => a - b)[Math.floor(rts.length / 2)] : 0,
+                    fastest_rt: rts.length > 0 ? Math.min(...rts) : 0,
+                    lapses: responses.filter(r => r.rt_ms === -1).length,
+                    false_starts: responses.filter(r => r.rt_ms === -2).length,
+                    n_valid: rts.length,
+                    ...(pvtNoteRef.current.trim() && { note: pvtNoteRef.current.trim() }),
+                  },
+                });
+              }
+            }
             resolve();
           }
         }, 50);
@@ -305,12 +654,13 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     (proto: Protocol, trialNum: number): Promise<void> => {
       return new Promise((resolve) => {
         if (abortRef.current) { resolve(); return; }
+        skipRestRef.current = false;
 
         let remaining = proto.restBetween;
         setState({ phase: "rest", trialNum, secondsLeft: remaining, canDiscard: true });
 
         timerRef.current = setInterval(() => {
-          if (abortRef.current) { cleanup(); resolve(); return; }
+          if (abortRef.current || skipRestRef.current) { cleanup(); resolve(); return; }
           remaining -= 0.1;
           if (remaining <= 0) {
             cleanup();
@@ -345,16 +695,30 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
     // Generate a session ID so multiple runs of the same protocol don't collide
     const sessionId = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
 
-    // 3-2-1 countdown
-    for (let i = 3; i > 0; i--) {
-      if (abortRef.current) return;
-      setState({ phase: "countdown", secondsLeft: i });
-      playBeep(440, 80);
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-
     for (let t = 1; t <= proto.reps; t++) {
       if (abortRef.current) return;
+
+      // PVT mode: play alert sound before each round (except first which starts immediately)
+      if (proto.pvt && t > 1) {
+        playAlertSound();
+        // Wait 3s for user to switch to browser
+        for (let i = 3; i > 0; i--) {
+          if (abortRef.current) return;
+          setState({ phase: "countdown", secondsLeft: i });
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } else {
+        // Normal 3-2-1 countdown (only for first trial, or non-PVT protocols)
+        if (t === 1) {
+          for (let i = 3; i > 0; i--) {
+            if (abortRef.current) return;
+            setState({ phase: "countdown", secondsLeft: i });
+            playBeep(440, 80);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      }
+
       await runTrial(proto, t, sessionId);
       if (t < proto.reps) {
         await runRest(proto, t);
@@ -375,15 +739,21 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
   // SSVEP overlay state (includes static control where flickerHz === 0)
   const showFlicker = state.phase === "recording" && state.cued && protocol.flickerHz !== undefined;
 
-  // ESC key to abort during SSVEP
+  // PVT overlay state
+  const showPvt = pvtActive && !!protocol.pvt;
+
+  // ESC key to abort during SSVEP or PVT
   useEffect(() => {
-    if (!showFlicker) return;
+    if (!showFlicker && !showPvt) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") stopSession();
+      if (e.key === "Escape") {
+        if (showPvt) setPvtActive(false);
+        stopSession();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [showFlicker, stopSession]);
+  }, [showFlicker, showPvt, stopSession]);
 
   return (
     <div
@@ -425,6 +795,24 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
           {protocol.reps} trials × {protocol.trialDuration}s
           {protocol.cueAt > 0 && <> · cue at {protocol.cueAt}s</>}
           {" · "}{protocol.instruction}
+        </div>
+      )}
+
+      {/* PVT session note */}
+      {state.phase === "idle" && protocol.pvt && (
+        <div className="mb-3">
+          <input
+            type="text"
+            value={pvtNote}
+            onChange={(e) => { setPvtNote(e.target.value); pvtNoteRef.current = e.target.value; }}
+            placeholder="Session note (e.g. fresh morning, 4h coding, post-lunch)"
+            className="w-full px-2.5 py-1.5 text-[11px] font-mono border"
+            style={{
+              background: "transparent",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          />
         </div>
       )}
 
@@ -508,22 +896,48 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
       )}
 
       {state.phase === "rest" && (
-        <div className="mb-3 flex items-center gap-3">
-          <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>
-            Rest · trial {state.trialNum}/{protocol.reps} done · next in {Math.ceil(state.secondsLeft)}s
-          </span>
-          {state.canDiscard && (
-            <button
-              onClick={discardLastTrial}
-              className="px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider border transition-colors"
-              style={{
-                background: "transparent",
-                borderColor: "var(--status-bad)",
-                color: "var(--status-bad)",
-              }}
-            >
-              DISCARD TRIAL
-            </button>
+        <div className="mb-3">
+          {protocol.pvt && state.secondsLeft > 30 ? (
+            /* Long work break for PVT — show large timer and work message */
+            <div className="flex flex-col items-center gap-2 py-4">
+              <span className="text-[11px] uppercase tracking-wider" style={{ color: "var(--text-dim)" }}>
+                Round {state.trialNum}/{protocol.reps} complete — go back to work
+              </span>
+              <span className="text-3xl font-mono font-bold" style={{ color: "var(--text-primary)" }}>
+                {Math.floor(state.secondsLeft / 60)}:{String(Math.floor(state.secondsLeft % 60)).padStart(2, "0")}
+              </span>
+              <span className="text-[11px] font-mono" style={{ color: "var(--text-dim)" }}>
+                until next PVT round (alert sound will play)
+              </span>
+              <button
+                onClick={() => {
+                  skipRestRef.current = true;
+                }}
+                className="mt-2 px-3 py-1.5 text-[11px] font-mono uppercase tracking-wider border transition-colors"
+                style={{ background: "transparent", borderColor: "var(--border)", color: "var(--text-secondary)" }}
+              >
+                SKIP TO NEXT ROUND
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-mono" style={{ color: "var(--text-dim)" }}>
+                Rest · trial {state.trialNum}/{protocol.reps} done · next in {Math.ceil(state.secondsLeft)}s
+              </span>
+              {state.canDiscard && (
+                <button
+                  onClick={discardLastTrial}
+                  className="px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider border transition-colors"
+                  style={{
+                    background: "transparent",
+                    borderColor: "var(--status-bad)",
+                    color: "var(--status-bad)",
+                  }}
+                >
+                  DISCARD TRIAL
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -589,6 +1003,16 @@ export function RecordingPanel({ isConnected, sendCommand }: Props) {
       {/* SSVEP flicker overlay (including static control at hz=0) */}
       {protocol.flickerHz !== undefined && (
         <SSVEPFlicker hz={protocol.flickerHz} active={showFlicker} />
+      )}
+
+      {/* PVT-B overlay */}
+      {protocol.pvt && (
+        <PVTOverlay
+          durationS={protocol.trialDuration}
+          active={showPvt}
+          onComplete={handlePvtComplete}
+          sharedResultsRef={pvtResultsRef}
+        />
       )}
     </div>
   );
