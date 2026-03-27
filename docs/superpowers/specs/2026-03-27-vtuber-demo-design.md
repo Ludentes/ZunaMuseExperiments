@@ -16,7 +16,7 @@ Phase 1 of a three-phase roadmap (demo → brainstorm delivery format → implem
 |---|---|---|
 | IMU acquisition | 6ch (accel xyz + gyro xyz) at 52Hz via AUXILIARY_PRESET | `backend/acquisition.py:71-95` |
 | Binary streaming | `MSG_IMU=0x03` broadcast over WebSocket | `backend/main.py:501-508`, `backend/protocol.py` |
-| Frontend decode | Binary frames received, currently discarded (line 55) | `frontend/src/hooks/useSensorStream.ts` |
+| Frontend decode | Binary frames received + decoded, but IMU data not stored (line 55) | `frontend/src/hooks/useSensorStream.ts` |
 | Three.js stack | `three`, `@react-three/fiber`, `@react-three/drei` installed | `frontend/package.json` |
 | Blink detection | EEG pipeline detector, ~99% accuracy, emits `bci_event` JSON | `backend/main.py:482-491` |
 | Demo page | Modular component layout with overlays | `frontend/src/routes/demo.tsx` |
@@ -102,30 +102,42 @@ Expose `imuRef` from the hook return value.
 New hook that runs the Madgwick filter on IMU data.
 
 **Input:** `imuRef` from useSensorStream
-**Output:** `{ quaternion: [x, y, z, w], recenter: () => void }`
+**Output:** `{ quaternion: { x, y, z, w }, recenter: () => void }`
 
 ```typescript
 // frontend/src/hooks/useHeadPose.ts
 import AHRS from 'ahrs';
 
 const madgwick = new AHRS({
-  sampleInterval: 19,  // ~52Hz → ~19ms between samples
+  sampleInterval: 52,  // Hz (NOT milliseconds) — Muse IMU rate
   algorithm: 'Madgwick',
   beta: 0.4,           // tuning parameter — higher = faster convergence, more accel noise
 });
+
+// Per-frame update call — note: gyro args come FIRST, then accel
+// Gyro must be converted from deg/s to rad/s
+const DEG2RAD = Math.PI / 180;
+madgwick.update(
+  gx * DEG2RAD, gy * DEG2RAD, gz * DEG2RAD,  // gyro (rad/s)
+  ax, ay, az                                    // accel (g's — ahrs expects g's, no conversion needed)
+);
+const q = madgwick.getQuaternion();  // returns { x, y, z, w } object
 ```
 
 Key behaviors:
 - On each animation frame, read latest `imuRef.current`, feed to Madgwick
-- Convert gyro from deg/s to rad/s (Madgwick expects rad/s)
-- Muse accel is in g's — Madgwick expects m/s^2? Check `ahrs` package docs. May need to multiply by 9.81 or may accept g's directly.
+- Convert gyro from deg/s to rad/s (`* Math.PI / 180`). Muse accel is in g's — `ahrs` expects g's, no conversion needed.
+- `ahrs.update()` argument order: gyro first (gx, gy, gz), then accel (ax, ay, az). Magnetometer args omitted for 6DOF.
+- `ahrs.getQuaternion()` returns `{ x, y, z, w }` object (not array)
 - Output quaternion represents absolute orientation
 - `recenter()` stores current quaternion as "home", all subsequent output is relative to home
 - Recenter on first valid reading (auto-calibrate initial pose)
 
+> **Note:** The research doc recommended backend-side fusion, but the metrics loop runs at 2Hz — far too slow for head tracking. Frontend fusion on the already-arriving 52Hz binary frames is more practical.
+
 **Yaw drift mitigation:**
 - Apply slow exponential decay toward home yaw when head is still (accel variance low)
-- Expose a manual `recenter()` callable from UI (button or triple-blink)
+- Expose a manual `recenter()` callable from UI (button or `triple_blink` bci_event)
 
 ### 3. `VTuberAvatar` Component
 
@@ -135,8 +147,8 @@ New R3F component that loads a VRM model and drives it from head pose + blink ev
 
 ```typescript
 interface VTuberAvatarProps {
-  quaternion: [number, number, number, number];  // from useHeadPose
-  blinkActive: boolean;                           // from bci_event
+  quaternion: { x: number; y: number; z: number; w: number };  // from useHeadPose
+  blinkActive: boolean;                                         // from bci_event
 }
 ```
 
@@ -147,7 +159,11 @@ Implementation:
   - Split rotation 60/40 between neck and head for natural look
   - Smooth with lerp (slerp for quaternions) — factor ~0.3 for responsive but not jittery
   - Set blink expression: `vrm.expressionManager.setValue('blink', blinkActive ? 1.0 : 0.0)`
-  - Call `vrm.update(delta)` for spring bone physics (hair bounce)
+  - Call `vrm.update(delta)` — this single call updates expressions, lookAt, spring bones, and humanoid together (three-vrm v3.x API)
+  - Guard all bone/expression access with null checks — `getRawBoneNode()` may return null for malformed models
+  - Display a fallback message if VRM load fails (network error, corrupt file)
+
+**Canvas sizing:** The R3F `<Canvas>` fills its parent container. The `/vtuber` route should use a full-viewport container (`h-screen`) minus overlay space.
 
 **VRM Model:**
 - Bundle a free VRM model from VRoid Hub in `frontend/public/models/`
