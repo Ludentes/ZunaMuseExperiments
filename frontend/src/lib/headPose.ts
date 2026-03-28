@@ -14,11 +14,13 @@ export class HeadPoseEstimator {
   private homeInverse: Quaternion | null = null;
   private initialized = false;
   private frameCount = 0;
+  private readonly beta: number;
 
   // How many frames to accumulate before setting home pose (lets filter settle)
   private static SETTLE_FRAMES = 26; // ~0.5s at 52Hz
 
   constructor(beta = 0.4) {
+    this.beta = beta;
     this.ahrs = new AHRS({
       sampleInterval: 52, // Hz
       algorithm: "Madgwick",
@@ -85,7 +87,7 @@ export class HeadPoseEstimator {
     this.ahrs = new AHRS({
       sampleInterval: 52,
       algorithm: "Madgwick",
-      beta: 0.4,
+      beta: this.beta,
     });
     this.homeInverse = null;
     this.initialized = false;
