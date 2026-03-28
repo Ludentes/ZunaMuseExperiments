@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";
 import {
-  MSG_EEG, MSG_PPG,
+  MSG_EEG, MSG_PPG, MSG_IMU,
   EEG_CHANNELS, PPG_CHANNELS,
   decodeBinaryFrame,
   getChannel,
@@ -25,6 +25,12 @@ export interface ZunaStatus {
   enabled: boolean;
 }
 
+export interface ImuSample {
+  accel: Float32Array; // [ax, ay, az] in g's
+  gyro: Float32Array;  // [gx, gy, gz] in deg/s
+  timestamp: number;   // performance.now() when received
+}
+
 export function useSensorStream() {
   const buffersRef = useRef<SensorBuffers>({
     eeg: Array.from({ length: EEG_CHANNELS }, () => new RingBuffer(EEG_BUFFER_SIZE)),
@@ -33,6 +39,7 @@ export function useSensorStream() {
 
   const metricsRef = useRef<string | null>(null);
   const eventsRef = useRef<BciEvent[]>([]);
+  const imuRef = useRef<ImuSample | null>(null);
   const [zunaStatus, setZunaStatus] = useState<ZunaStatus>({ available: false, enabled: false });
 
   const { readyState, sendJsonMessage, lastMessage } = useWebSocket(WS_URL, {
@@ -51,8 +58,22 @@ export function useSensorStream() {
             for (let ch = 0; ch < Math.min(frame.channels, PPG_CHANNELS); ch++) {
               buffers.ppg[ch].push(getChannel(frame, ch));
             }
+          } else if (frame.type === MSG_IMU) {
+            const last = frame.samples - 1;
+            imuRef.current = {
+              accel: new Float32Array([
+                frame.data[0 * frame.samples + last],
+                frame.data[1 * frame.samples + last],
+                frame.data[2 * frame.samples + last],
+              ]),
+              gyro: new Float32Array([
+                frame.data[3 * frame.samples + last],
+                frame.data[4 * frame.samples + last],
+                frame.data[5 * frame.samples + last],
+              ]),
+              timestamp: performance.now(),
+            };
           }
-          // IMU: not buffered for waveform, only used via metrics JSON
         });
       } else {
         // JSON frame — check for zuna_status or metrics
@@ -85,6 +106,7 @@ export function useSensorStream() {
     buffers: buffersRef,
     metricsRef,
     eventsRef,
+    imuRef,
     lastMessage,
     readyState,
     isConnected: readyState === ReadyState.OPEN,
