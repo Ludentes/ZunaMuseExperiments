@@ -18,6 +18,7 @@ function VTuberPage() {
 
   // Track last blink timestamp for the avatar
   const [lastBlinkTs, setLastBlinkTs] = useState(0);
+  const [vrmError, setVrmError] = useState<string | null>(null);
   const prevEventRef = useRef<number>(0);
   const recenterRef = useRef<(() => void) | null>(null);
 
@@ -49,6 +50,7 @@ function VTuberPage() {
           imuRef={imuRef}
           lastBlinkTimestamp={lastBlinkTs}
           onRecenterRef={recenterRef}
+          onError={setVrmError}
         />
         <OrbitControls
           target={[0, 1.3, 0]}
@@ -92,6 +94,18 @@ function VTuberPage() {
       <div className="absolute bottom-4 left-4 text-xs text-zinc-500 font-mono">
         Move head to control avatar · Blink to trigger expression · Orbit: drag · Zoom: scroll
       </div>
+
+      {vrmError && (
+        <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/90">
+          <div className="rounded-lg bg-red-950 border border-red-800 p-6 max-w-lg font-mono text-sm">
+            <p className="text-red-300 font-bold mb-2">Failed to load VRM model</p>
+            <p className="text-zinc-400 mb-3">Download the model file:</p>
+            <code className="block bg-zinc-900 text-green-400 p-3 rounded text-xs break-all">
+              curl -L -o frontend/public/models/default-avatar.vrm "https://github.com/pixiv/three-vrm/raw/release/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm"
+            </code>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

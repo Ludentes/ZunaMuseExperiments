@@ -10,6 +10,7 @@ interface VTuberAvatarProps {
   quaternionRef: React.RefObject<Quaternion>;
   /** Latest bci_event kind — triggers blink on "single_blink" */
   lastBlinkTimestamp: number;
+  onError?: (msg: string) => void;
 }
 
 // Split rotation between neck (60%) and head (40%) for natural look
@@ -19,6 +20,7 @@ const HEAD_WEIGHT = 0.4;
 export function VTuberAvatar({
   quaternionRef,
   lastBlinkTimestamp,
+  onError,
 }: VTuberAvatarProps) {
   const { scene } = useThree();
   const [vrm, setVrm] = useState<VRM | null>(null);
@@ -42,6 +44,7 @@ export function VTuberAvatar({
       (err) => {
         console.error("VRM load failed:", err);
         setError("Failed to load VRM model");
+        onError?.("Failed to load VRM model. Run: curl -L -o frontend/public/models/default-avatar.vrm \"https://github.com/pixiv/three-vrm/raw/release/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm\"");
       },
     );
   }, []);
