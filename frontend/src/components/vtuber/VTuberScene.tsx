@@ -5,7 +5,7 @@ import { VTuberAvatar } from "./VTuberAvatar";
 interface VTuberSceneProps {
   imuRef: React.RefObject<ImuSample | null>;
   lastBlinkTimestamp: number;
-  onRecenterRef: React.MutableRefObject<(() => void) | null>;
+  onRecenterRef: React.RefObject<(() => void) | null>;
 }
 
 /**
