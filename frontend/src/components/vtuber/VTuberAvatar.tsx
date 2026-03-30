@@ -2,12 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, type VRM } from "@pixiv/three-vrm";
-import { Quaternion } from "three";
+import { Euler, Quaternion } from "three";
 import { BlinkController } from "./BlinkController";
+
+export interface AngleBias {
+  pitch: number; // degrees
+  yaw: number;
+  roll: number;
+}
 
 interface VTuberAvatarProps {
   /** Ref to smoothed quaternion from useHeadPose */
   quaternionRef: React.RefObject<Quaternion>;
+  /** Ref to constant angle bias (degrees) */
+  biasRef: React.RefObject<AngleBias>;
   /** Latest bci_event kind — triggers blink on "single_blink" */
   lastBlinkTimestamp: number;
   onError?: (msg: string) => void;
@@ -17,8 +25,12 @@ interface VTuberAvatarProps {
 const NECK_WEIGHT = 0.6;
 const HEAD_WEIGHT = 0.4;
 
+
+const DEG2RAD = Math.PI / 180;
+
 export function VTuberAvatar({
   quaternionRef,
+  biasRef,
   lastBlinkTimestamp,
   onError,
 }: VTuberAvatarProps) {
@@ -37,7 +49,7 @@ export function VTuberAvatar({
       "/models/default-avatar.vrm",
       (gltf) => {
         const loadedVrm = gltf.userData.vrm as VRM;
-        loadedVrm.scene.rotation.y = Math.PI; // Face the camera
+        // VRM models face +Z by default, which is toward camera in Three.js — no rotation needed
         setVrm(loadedVrm);
       },
       undefined,
@@ -62,26 +74,7 @@ export function VTuberAvatar({
   useFrame((_, delta) => {
     if (!vrm) return;
 
-    // --- Head rotation ---
-    const q = quaternionRef.current;
-    if (q) {
-      const neckBone = vrm.humanoid?.getRawBoneNode("neck");
-      const headBone = vrm.humanoid?.getRawBoneNode("head");
-
-      if (neckBone && headBone) {
-        // Split quaternion between neck and head
-        const identity = new Quaternion();
-        const neckQ = identity.clone().slerp(q, NECK_WEIGHT);
-        const headQ = identity.clone().slerp(q, HEAD_WEIGHT);
-        neckBone.quaternion.copy(neckQ);
-        headBone.quaternion.copy(headQ);
-      } else if (headBone) {
-        // Fallback: all rotation to head
-        headBone.quaternion.copy(q);
-      }
-    }
-
-    // --- Blink ---
+    // --- Blink (set before update so expressionManager.update() applies it) ---
     if (lastBlinkTimestamp > prevBlinkTs.current) {
       prevBlinkTs.current = lastBlinkTimestamp;
       blinkRef.current.trigger();
@@ -91,7 +84,33 @@ export function VTuberAvatar({
     vrm.expressionManager?.setValue("blink", blinkValue);
 
     // --- Update VRM systems (expressions, spring bones, etc.) ---
+    // Must run BEFORE bone rotation — humanoid.update() inside resets raw bones
     vrm.update(delta);
+
+    // --- Head rotation ---
+    // After vrm.update(), bones are in their rest pose. Read rest, then compose IMU on top.
+    const neckBone = vrm.humanoid?.getRawBoneNode("neck");
+    const headBone = vrm.humanoid?.getRawBoneNode("head");
+
+    const q = quaternionRef.current;
+    if (q) {
+      // Compose IMU quaternion with constant bias offset
+      const bias = biasRef.current;
+      const biasQ = new Quaternion().setFromEuler(
+        new Euler(bias.pitch * DEG2RAD, bias.yaw * DEG2RAD, bias.roll * DEG2RAD, "YXZ"),
+      );
+      const combined = biasQ.multiply(q);
+
+      if (neckBone && headBone) {
+        const identity = new Quaternion();
+        const neckQ = identity.clone().slerp(combined, NECK_WEIGHT);
+        const headQ = identity.clone().slerp(combined, HEAD_WEIGHT);
+        neckBone.quaternion.multiply(neckQ);
+        headBone.quaternion.multiply(headQ);
+      } else if (headBone) {
+        headBone.quaternion.multiply(combined);
+      }
+    }
   });
 
   if (error) {

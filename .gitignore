@@ -46,3 +46,6 @@ frontend/.vinxi/
 frontend/.output/
 frontend/public/models/*.vrm
 temp/
+
+# Nested repos (sub-products)
+muse-vtuber/
