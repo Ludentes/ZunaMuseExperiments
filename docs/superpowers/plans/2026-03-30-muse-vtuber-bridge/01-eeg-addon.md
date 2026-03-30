@@ -486,14 +486,45 @@ Expected: FAIL
 
 - [ ] **Step 3: Port BlinkDetector from zyphraexps**
 
-Copy `zyphraexps/backend/pipeline/stages/detectors.py` BlinkDetector class to `src/muse_vtuber/pipeline/blink.py`. Change imports:
-- `from backend.pipeline.base import Stage` → `from muse_vtuber.pipeline.base import Stage`
-- `from backend.pipeline.types import ...` → `from muse_vtuber.pipeline.types import ...`
-- Import `SpeechResult` from `muse_vtuber.pipeline.speech`
-- Import `ClenchResult` from `muse_vtuber.pipeline.clench`
-- Remove any references to `PreprocessingResult` or `ZunaResult` — use `frame.eeg` directly
+**Source:** `zyphraexps/backend/pipeline/stages/detectors.py` lines 105-873 (~768 lines).
 
-The BlinkDetector is ~400-770 lines. Copy it entirely — do not simplify. The tuning constants were validated on recorded Muse data.
+Copy the entire `BlinkDetector` class to `src/muse_vtuber/pipeline/blink.py`. **Do not simplify or refactor** — the tuning constants and guard chain were validated on 342 recorded blink trials.
+
+**Import changes:**
+```python
+# OLD (zyphraexps)
+from backend.pipeline.base import Stage
+from backend.pipeline.types import Cadence, Event, PipelineFrame
+
+# NEW (muse-vtuber)
+from muse_vtuber.pipeline.base import Stage
+from muse_vtuber.pipeline.types import Cadence, Event, PipelineFrame
+from muse_vtuber.pipeline.speech import SpeechResult
+from muse_vtuber.pipeline.clench import ClenchResult
+```
+
+**What to keep as-is:**
+- All `__init__` parameters and defaults (threshold_sd=2.5, refractory_ms=100, etc.)
+- `_update_baseline()` — MAD-based adaptive threshold with rolling window
+- `_check_guards()` — motion guard, clench guard, speech fusion guard
+- `_validate_shape()` — duration check + slope direction validation
+- `_classify_blinks()` — refractory + multi-blink window
+- All rolling buffers (`_frontal_buf`, `_temporal_buf`, `_af7_buf`, `_af8_buf`)
+- Per-channel baselines for AF7/AF8 independent tracking
+- Guard enable flags (`guard_motion`, `guard_clench`, `guard_speech`, `guard_shape`)
+- Temporal HF baseline tracking for clench guard
+
+**What to remove/modify:**
+1. **Template matching** — remove `_TEMPLATE_PATH`, `_matched_filt`, and the `_template_match()` method. It's disabled (`mf_threshold=0`) and requires a `.npy` file we won't ship. Remove the `Path` import if no longer needed.
+2. **Calibration capture** — remove `_capture_active`, `_capture_start`, `_capture_duration`, `_capture_samples`, `start_capture()`, and the capture logic in `process()`. This was for the demo's live calibration UI which we don't have.
+3. **`set_calibrated_threshold()`** and **`set_blink_threshold()`** — remove. These were for the demo's calibration flow. The adaptive MAD threshold (`threshold_sd=2.5`) works without calibration.
+4. **`SpeechResult` and `ClenchResult` references** — in zyphraexps these are in the same file. Import them from `muse_vtuber.pipeline.speech` and `muse_vtuber.pipeline.clench` respectively.
+5. **Guard toggle methods** — keep the boolean flags but remove any websocket/UI-facing setter methods if present.
+
+**What to verify after porting:**
+- File should be ~550-650 lines (768 minus template matching, capture, calibration)
+- `process(frame)` method should: update buffers → check threshold → check guards → validate shape → classify → emit Event
+- The `_hf_rms()` helper function is already in `speech.py` — import it from there or duplicate (it's 3 lines)
 
 - [ ] **Step 4: Run tests**
 

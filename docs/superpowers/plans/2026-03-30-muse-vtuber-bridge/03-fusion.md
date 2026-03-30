@@ -20,7 +20,20 @@
 
 Parse OpenSeeFace's binary UDP protocol. Extract head rotation quaternion + confidence.
 
-OpenSeeFace binary format (per-face packet): the tracking data is packed as a sequence of floats. The relevant fields are: `face_id` (int), `width` (float), `height` (float), then 6 floats for euler+translation, then the quaternion (4 floats: x, y, z, w), then face detection success (float 0-1), and PnP error (float). Total header before landmarks is well-defined.
+Each face block is exactly **1785 bytes**. Multi-face packets concatenate blocks. See `docs/research/2026-03-30-openseeface-udp-protocol.md` for the full byte layout. Key fields we need:
+
+| Offset | Size | Format | Field |
+|--------|------|--------|-------|
+| 0 | 8 | `d` | timestamp (float64) |
+| 8 | 4 | `i` | face_id (int32) |
+| 28 | 1 | `B` | success (uint8, 0 or 1) |
+| 29 | 4 | `f` | pnp_error (float32) |
+| 33 | 16 | `4f` | quaternion x,y,z,w (float32×4) |
+
+**Critical parsing notes:**
+- The `B` at offset 28 is 1 byte with NO alignment padding — next float is at offset 29, not 32
+- Quaternion order is `(x, y, z, w)` — standard, not Hamilton
+- Byte order is native (little-endian on x86), no explicit prefix
 
 - [ ] **Step 1: Write test**
 
@@ -30,7 +43,11 @@ import struct
 
 import pytest
 
-from muse_vtuber.openseeface import OpenSeeFaceData, parse_openseeface_packet
+from muse_vtuber.openseeface import (
+    FACE_BLOCK_SIZE,
+    OpenSeeFaceData,
+    parse_openseeface_packet,
+)
 
 
 def _build_fake_packet(
@@ -38,31 +55,41 @@ def _build_fake_packet(
     qy: float = 0.0,
     qz: float = 0.0,
     qw: float = 1.0,
-    confidence: float = 1.0,
+    success: int = 1,
+    pnp_error: float = 0.1,
 ) -> bytes:
-    """Build a minimal fake OpenSeeFace UDP packet.
+    """Build a full 1785-byte fake OpenSeeFace UDP packet.
 
-    Simplified format for testing. Real format is more complex with landmarks.
-    We test the parser against real recorded packets in integration tests.
+    Real format: timestamp(d) face_id(i) width(f) height(f)
+    right_eye(f) left_eye(f) success(B) pnp_error(f)
+    quat(4f) euler(3f) translation(3f)
+    landmark_conf(68f) landmarks_2d(136f) points_3d(210f) features(14f)
     """
-    # Face ID (int32) + timestamp (double) + width, height (float) +
-    # success (float) + pnp_error (float) +
-    # quaternion (4 floats) + euler (3 floats) + translation (3 floats) +
-    # 68 landmarks × (x, y, confidence) × float = lots of data
-    #
-    # For unit test, we'll test the parser function with known offsets.
-    # Real integration test uses captured packets.
-    return struct.pack(
-        "<i d 2f f f 4f 3f 3f",
-        0,            # face_id
-        0.0,          # timestamp
-        640.0, 480.0, # width, height
-        confidence,   # success
-        0.1,          # pnp_error
+    header = struct.pack(
+        "d i f f f f B f 4f 3f 3f",
+        0.0,              # timestamp
+        0,                # face_id
+        640.0, 480.0,     # width, height
+        0.9, 0.9,         # right_eye_open, left_eye_open
+        success,          # success (uint8)
+        pnp_error,        # pnp_error
         qx, qy, qz, qw,  # quaternion
-        0.0, 0.0, 0.0,    # euler (yaw, pitch, roll)
+        0.0, 0.0, 0.0,    # euler
         0.0, 0.0, 0.0,    # translation
     )
+    # Fill landmarks + 3D points + features with zeros
+    landmark_conf = struct.pack("68f", *([0.0] * 68))
+    landmarks_2d = struct.pack("136f", *([0.0] * 136))
+    points_3d = struct.pack("210f", *([0.0] * 210))
+    features = struct.pack("14f", *([0.0] * 14))
+    return header + landmark_conf + landmarks_2d + points_3d + features
+
+
+def test_face_block_size():
+    """Each face block is exactly 1785 bytes."""
+    packet = _build_fake_packet()
+    assert len(packet) == FACE_BLOCK_SIZE
+    assert len(packet) == 1785
 
 
 def test_parse_packet_extracts_quaternion():
@@ -75,11 +102,16 @@ def test_parse_packet_extracts_quaternion():
     assert abs(data.qw - 0.9) < 0.001
 
 
-def test_parse_packet_extracts_confidence():
-    packet = _build_fake_packet(confidence=0.85)
+def test_parse_packet_extracts_success():
+    packet = _build_fake_packet(success=1)
     data = parse_openseeface_packet(packet)
     assert data is not None
-    assert abs(data.confidence - 0.85) < 0.001
+    assert data.success is True
+
+    packet_fail = _build_fake_packet(success=0)
+    data_fail = parse_openseeface_packet(packet_fail)
+    assert data_fail is not None
+    assert data_fail.success is False
 
 
 def test_parse_short_packet_returns_none():
@@ -87,11 +119,11 @@ def test_parse_short_packet_returns_none():
     assert data is None
 
 
-def test_low_confidence_flagged():
-    packet = _build_fake_packet(confidence=0.1)
+def test_pnp_error_extracted():
+    packet = _build_fake_packet(pnp_error=3.14)
     data = parse_openseeface_packet(packet)
     assert data is not None
-    assert data.confidence < 0.5
+    assert abs(data.pnp_error - 3.14) < 0.01
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -110,9 +142,10 @@ Expected: FAIL
 """OpenSeeFace UDP receiver and binary protocol parser.
 
 OpenSeeFace sends face tracking data as UDP packets with binary encoding.
-We extract: head rotation quaternion + face detection confidence.
+Each face block is exactly 1785 bytes (multi-face packets concatenate blocks).
 
-Reference: https://github.com/emilianavt/OpenSeeFace
+Protocol reference: docs/research/2026-03-30-openseeface-udp-protocol.md
+Source: https://github.com/emilianavt/OpenSeeFace (facetracker.py)
 """
 from __future__ import annotations
 
@@ -123,58 +156,62 @@ from dataclasses import dataclass
 
 log = logging.getLogger("openseeface")
 
-# OpenSeeFace binary packet layout (simplified header before landmarks):
-# int32: face_id
-# double: timestamp
-# float: camera_width
-# float: camera_height
-# float: success (0-1, face detection confidence)
-# float: pnp_error
-# float × 4: quaternion (x, y, z, w)
-# float × 3: euler (yaw, pitch, roll) in degrees
-# float × 3: translation (x, y, z)
-# Then: 68 landmarks × (x, y, confidence) = 204 floats
-# Then: 68 3D points × (x, y, z) = 204 floats
-# Then: features (eye open, mouth, etc.)
-_HEADER_FORMAT = "<i d 2f f f 4f 3f 3f"
-_HEADER_SIZE = struct.calcsize(_HEADER_FORMAT)
+# Per-face block layout (1785 bytes total):
+# timestamp(d=8) face_id(i=4) width(f=4) height(f=4)
+# right_eye(f=4) left_eye(f=4) success(B=1) pnp_error(f=4)
+# quaternion(4f=16) euler(3f=12) translation(3f=12)
+# landmark_conf(68f=272) landmarks_2d(136f=544) points_3d(210f=840) features(14f=56)
+FACE_BLOCK_SIZE = 1785
+
+# Header format: everything before landmarks (73 bytes)
+# NOTE: success is B (1 byte, uint8), NOT f (4 byte float).
+# This means NO alignment padding — pnp_error starts at offset 29, not 32.
+_HEADER_FMT = "d i f f f f B f 4f 3f 3f"
+_HEADER_SIZE = struct.calcsize(_HEADER_FMT)  # 73 bytes
 
 
 @dataclass
 class OpenSeeFaceData:
-    """Parsed tracking data from one OpenSeeFace packet."""
+    """Parsed tracking data from one OpenSeeFace face block."""
 
     face_id: int
     qx: float
     qy: float
     qz: float
     qw: float
-    confidence: float
+    success: bool        # True if tracking succeeded
     pnp_error: float
+    right_eye_open: float
+    left_eye_open: float
 
 
 def parse_openseeface_packet(data: bytes) -> OpenSeeFaceData | None:
-    """Parse an OpenSeeFace UDP packet. Returns None if too short."""
-    if len(data) < _HEADER_SIZE:
+    """Parse the first face from an OpenSeeFace UDP packet.
+
+    Returns None if packet is too short (< 1785 bytes).
+    For multi-face, only the first face (id=0) is used.
+    """
+    if len(data) < FACE_BLOCK_SIZE:
         return None
     try:
-        fields = struct.unpack(_HEADER_FORMAT, data[:_HEADER_SIZE])
+        fields = struct.unpack_from(_HEADER_FMT, data, 0)
     except struct.error:
         return None
 
-    face_id = fields[0]
-    # timestamp = fields[1]
-    # width, height = fields[2], fields[3]
-    success = fields[4]
-    pnp_error = fields[5]
-    qx, qy, qz, qw = fields[6], fields[7], fields[8], fields[9]
-    # euler and translation follow but we don't need them
-
+    # Unpack field order matches _HEADER_FMT:
+    # timestamp(0) face_id(1) width(2) height(3)
+    # right_eye(4) left_eye(5) success(6) pnp_error(7)
+    # qx(8) qy(9) qz(10) qw(11) euler_x(12-14) trans_x(15-17)
     return OpenSeeFaceData(
-        face_id=face_id,
-        qx=qx, qy=qy, qz=qz, qw=qw,
-        confidence=success,
-        pnp_error=pnp_error,
+        face_id=fields[1],
+        qx=fields[8],
+        qy=fields[9],
+        qz=fields[10],
+        qw=fields[11],
+        success=bool(fields[6]),
+        pnp_error=fields[7],
+        right_eye_open=fields[4],
+        left_eye_open=fields[5],
     )
 
 
@@ -214,10 +251,15 @@ class OpenSeeFaceReceiver:
             self._transport = None
 
     def get_latest(self) -> OpenSeeFaceData | None:
-        """Get most recent tracking data (or None if no data received)."""
+        """Get and consume most recent tracking data (or None if nothing received)."""
         data = self.latest
         self.latest = None  # consume
         return data
+
+    @property
+    def is_connected(self) -> bool:
+        """True if we've received at least one valid packet."""
+        return self._transport is not None
 ```
 
 - [ ] **Step 4: Run tests**
@@ -449,9 +491,11 @@ In the main loop, before the head tracking section, add OpenSeeFace check:
             # Check for OpenSeeFace webcam data (fusion mode)
             if osf_receiver and fusion:
                 osf_data = osf_receiver.get_latest()
-                if osf_data is not None:
+                if osf_data is not None and osf_data.success:
                     webcam_q = (osf_data.qx, osf_data.qy, osf_data.qz, osf_data.qw)
-                    fusion.update_webcam(webcam_q, osf_data.confidence)
+                    # Confidence derived from PnP error: low error = high confidence
+                    confidence = max(0.0, min(1.0, 1.0 - osf_data.pnp_error / 20.0))
+                    fusion.update_webcam(webcam_q, confidence)
 ```
 
 Modify the head tracking section to use fusion when available:
