@@ -6,6 +6,30 @@
 
 **Spec:** `muse-vtuber/docs/superpowers/specs/2026-03-31-setup-ui-design.md`
 
+## Reference: Existing Demo App
+
+There is a **working demo frontend** in the parent project at `../zyphraexps/frontend/` that implements many of the same patterns we need. **Use it as a reference implementation** — cross-check your work against it. Key files:
+
+| What we need | Reference file in `zyphraexps/frontend/src/` | What to reuse |
+|---|---|---|
+| WebSocket binary protocol | `lib/protocol.ts` | Frame format constants, `decodeBinaryFrame()`, `Metrics` type interface |
+| WebSocket hook + reconnect | `hooks/useSensorStream.ts` | Connection logic, binary/JSON message routing, ref-based storage pattern |
+| Signal quality display | `components/demo/CompactFit.tsx` | 4-dot per-channel display, color thresholds, fit status badge |
+| Head pose display | `components/MotionPanel.tsx` | Pitch/roll/yaw rendering, color-coding by magnitude |
+| VTuber page layout | `routes/vtuber.tsx` | Bias sliders (±45deg), recenter button, settle progress overlay, sidebar + canvas layout |
+| Avatar animation | `components/vtuber/VTuberAvatar.tsx` | Blink easing (0→1→0 over 150ms), bone rotation split pattern |
+| Head pose estimation | `lib/headPose.ts` | Madgwick + One Euro + yaw decay (already ported to Python in Plan 2) |
+| One Euro filter | `lib/oneEuroFilter.ts` | Adaptive smoothing (already ported to Python in Plan 2) |
+| Ring buffer utility | `lib/ringBuffer.ts` | Circular buffer for time-series data |
+
+**Important differences** from the reference app:
+- Reference uses **VRM (3D)** via Three.js + react-three-fiber. We use **Live2D (2D)** via PixiJS.
+- Reference does head pose estimation **client-side** (JS Madgwick). We do it **server-side** (Python) and stream the result as JSON metrics. The frontend just displays values, no IMU processing.
+- Reference uses the full binary protocol (EEG/PPG/IMU frames). We use **JSON-only** for V1 — the backend computes everything and sends metrics at ~30Hz.
+- Reference has many pages (dashboard, demo, vtuber). We have **one page** — the setup/calibration tool.
+
+**When implementing each task**, read the corresponding reference file first and adapt the patterns for our simpler architecture. Don't copy-paste blindly — our frontend is leaner (no R3F, no ring buffers for V1, no binary frame parsing).
+
 ---
 
 ### Task 1: Signal Quality Pipeline Stage
@@ -368,6 +392,8 @@ git commit -m "feat: frontend scaffold — Vite + React + Tailwind + shadcn + Li
 
 ### Task 4: WebSocket Hook + Signal Quality UI
 
+**Reference:** Read `zyphraexps/frontend/src/hooks/useSensorStream.ts` for WebSocket reconnect pattern, and `zyphraexps/frontend/src/components/demo/CompactFit.tsx` for signal quality display. Our version is simpler (JSON only, no binary frames).
+
 **Files:**
 - Create: `frontend/src/hooks/useMuseStream.ts`
 - Create: `frontend/src/components/SignalQuality.tsx`
@@ -429,6 +455,8 @@ git commit -m "feat: WebSocket hook + signal quality display"
 
 ### Task 5: Live2D Avatar Component
 
+**Reference:** Read `zyphraexps/frontend/src/components/vtuber/VTuberAvatar.tsx` for animation patterns (blink easing 0→1→0 over 150ms, frame update loop). Our version drives Live2D parameters instead of VRM bones — simpler because Live2D takes Euler angles directly (no quaternion math needed client-side).
+
 **Files:**
 - Create: `frontend/src/components/Live2DAvatar.tsx`
 - Modify: `frontend/src/App.tsx`
@@ -467,6 +495,8 @@ git commit -m "feat: Live2D avatar component — renders VTS model with BCI para
 ---
 
 ### Task 6: Bias Controls + Recenter
+
+**Reference:** Read `zyphraexps/frontend/src/routes/vtuber.tsx` — it has working bias sliders (±45deg, 1deg steps), recenter button, settle progress overlay, and the complete sidebar layout. Adapt the UI patterns and slider ranges from there. Also read `zyphraexps/frontend/src/components/MotionPanel.tsx` for head angle display formatting.
 
 **Files:**
 - Create: `frontend/src/components/BiasControls.tsx`
