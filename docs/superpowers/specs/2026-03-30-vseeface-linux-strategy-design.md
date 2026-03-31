@@ -1,136 +1,86 @@
-# VSeeFace on Linux: Strategy Design
+# VTuber Renderer Strategy: Warudo + Web Renderer
 
 **Date:** 2026-03-30
-**Status:** Draft
-**Context:** The muse-vtuber bridge sends VMC protocol data. We need a rendering target on Linux.
+**Status:** Accepted
+**Context:** The muse-vtuber bridge sends VMC protocol data. We need a rendering target on Linux for development and a strategy for users.
 
 ## Problem
 
-VSeeFace is the most popular free VRM avatar renderer for VTubers but is Windows-only. Our development platform is Linux. We need to decide how to handle avatar rendering during development and what to recommend to users.
+Our development platform is Linux. We need a VMC-receiving avatar renderer for testing and a recommendation for users.
 
-## Constraints
+## Market Reality (2026 Data)
 
-- Development platform: Linux (no Windows available)
-- Bridge already outputs VMC protocol (UDP, `/VMC/Ext/Blend/Val`)
-- Plans 4 and 5 add VRChat OSC and VTube Studio outputs
-- The zyphraexps frontend already has a React/TanStack Start SPA
-- YAGNI: we should not build a full renderer unless there's no viable alternative
+| Software | Avg Concurrent | YoY Trend | Type |
+|----------|---------------|-----------|------|
+| VTube Studio | 10,633 | +25% | 2D (Live2D) — dominates |
+| Warudo | 860 | +225% | 3D (VRM) — fastest growing |
+| Animaze | 262 | -30% | 3D — dying |
+
+- **2D (Live2D) is ~59% of the market.** VTube Studio owns it.
+- **3D (VRM) is ~32%, growing at 11% CAGR.** Warudo is the clear successor to VSeeFace.
+- VSeeFace last release Feb 2025, users actively migrating to Warudo/VNyan.
+- **Linux VTubers are a tiny niche** (~7 GitHub stars on "Awesome VTubing on Linux"). Most use Proton.
+- No web-based VMC receiver exists. Nobody asks for one. Uncontested but tiny market.
 
 ## Options Evaluated
 
 ### Option 1: Fork VSeeFace — REJECTED
 
-VSeeFace is **closed-source** (Unity binary). The license explicitly prohibits modification of core files. There is no source code to fork. The open-source component (OpenSeeFace) is only the face tracker, not the renderer. The author (emilianavt) appears inactive — last release was February 2023.
+Closed-source Unity binary. License prohibits modification. No source code. Not an option.
 
-**Verdict:** Technically and legally impossible. Not an option.
+### Option 2: Warudo via Proton — RECOMMENDED FOR DEV/TESTING
 
-### Option 2: Wine/Proton — RECOMMENDED FOR DEV/TESTING
+- **Free on Steam** for indie VTubers (Pro is enterprise-only pricing)
+- **Full VMC receiver** on port 39539
+- **Works under GE-Proton** with `PROTON_DISABLE_NVAPI=1 PROTON_USE_WOW64=1 %command%`
+- 93% positive Steam reviews, 860 concurrent users (+225% YoY)
+- Beats VSeeFace on: audio+mocap mouth tracking, hand tracking, 500+ idle animations, node-based scripting
+- **This is the primary target app for our VMC output.** The market has moved from VSeeFace to Warudo.
 
-VSeeFace and Warudo both work under Wine/Proton on Linux with workarounds.
+### Option 3: VSeeFace via Wine — DEPRECATED FALLBACK
 
-**VSeeFace under Wine:**
-- Requires 64-bit Wine prefix, Arial font, `vcrun2015`, DLL deletions (`GPUManagementPlugin.dll`, `LeapCV5.dll`)
-- Webcam tracking broken (irrelevant — we send VMC data, not use its tracker)
-- Flags: `--background-color '#00FF00' --disable-wine-mode`
-- Virtual camera and Spout2 do not work
+Still works with workarounds (64-bit Wine prefix, fonts, DLL deletions) but VSeeFace is stale. Only document as fallback for users who already have it.
 
-**Warudo under Proton:**
-- Reportedly the most polished option. Launch options: `PROTON_DISABLE_NVAPI=1 PROTON_USE_WOW64=1 %command%`
-- Accepts VMC on port 39539 natively
-- Active development (unlike VSeeFace)
+### Option 4: SnekStudio (Linux-native) — DOCUMENT ONLY
 
-**Trade-offs:**
-- (+) VSeeFace/Warudo are mature, well-tested renderers with full VRM support
-- (+) No code to write — just document the setup
-- (-) Friction: Wine prefix setup, font installs, DLL cleanup
-- (-) VSeeFace is stale; Warudo is commercial ($50 for Pro features)
-- (-) Not a product strategy — just a development aid
+Godot-based, GPL-3.0, accepts VMC. But alpha quality, VRM 0.0 only. Mention in docs, don't build around it.
 
-### Option 3a: SnekStudio — VIABLE AS DOCUMENTED TARGET
+### Option 5: Web renderer (three-vrm) — LOW PRIORITY
 
-Godot 4.6-based, GPL-3.0, Linux-native. Accepts VMC, renders VRM 0.0.
+- No existing demand (nobody asks for web VMC receivers)
+- Technical barrier: browsers can't receive UDP, need WebSocket bridge
+- Incremental cost to make our planned frontend renderer VMC-generic is small
+- But VTube Studio plugin (Plan 5) reaches 12x more users — do that first
 
-- (+) Native Linux, open source, active development (v0.1.5, Sep 2025)
-- (-) Alpha quality, VRM 0.0 only (many models use 1.0+)
-- (-) Not mature enough to depend on
+### Option 6: Custom Godot renderer — REJECTED (YAGNI)
 
-**Verdict:** Document as a "works with" option. Do not build around it.
+Wrong stack, over-engineered.
 
-### Option 3b: Web-based renderer (three-vrm) — RECOMMENDED LONG-TERM
+## Decision
 
-Build a VRM renderer in the existing React frontend using `@pixiv/three-vrm`.
+### Now: Warudo under Proton
 
-- (+) Runs everywhere (Linux, Mac, Windows, mobile)
-- (+) No Wine, no native deps, no third-party app dependency
-- (+) Already have WebSocket backend — send blendshapes directly, skip VMC for own UI
-- (+) three-vrm is mature (pixiv-maintained, MIT, active)
-- (+) Full control over UX: show EEG debug overlays, parameter tuning UI
-- (-) Effort: need to implement VRM loading, spring bone physics, blendshape application
-- (-) Performance: WebGL vs native — adequate for single avatar, not for complex scenes
+Install Warudo via Steam with GE-Proton. Use as primary VMC rendering target for development and testing. Document setup.
 
-### Option 3c: Custom Godot renderer — REJECTED (YAGNI)
+### For users: recommend Warudo (Windows) or Warudo (Proton on Linux)
 
-GodotXRVmcTracker + godot-vrm addons could create a native Linux VMC receiver.
+Warudo is free, actively developed, and the market is moving there. It's what 3D VTubers actually use in 2026.
 
-- (+) Native performance, VRM 0.x and 1.x support
-- (-) Introduces a new technology stack (GDScript/Godot) into the project
-- (-) Higher effort than web approach for similar results
-- (-) Maintaining a Godot app is a new product, not a feature
+### Deprioritize: own web renderer
 
-**Verdict:** Over-engineered for our needs. YAGNI.
+The Linux VTuber market is too small to justify building a web renderer now. When/if we build one for our frontend, making it VMC-generic is cheap — but it shouldn't jump ahead of VTube Studio support (Plan 5), which reaches the largest user base.
 
-## Recommendation
+## Priority Stack
 
-**Two-phase approach:**
-
-### Phase 1: Wine/Proton for development (now)
-
-Use Warudo under Proton (preferred) or VSeeFace under Wine as the VMC rendering target during development. Write a setup guide in `docs/` covering:
-
-1. Warudo Proton setup (Steam, launch options)
-2. VSeeFace Wine setup (prefix, fonts, DLLs, flags)
-3. VMC port configuration (39539)
-4. Verification: run muse-vtuber with `--synthetic --debug`, confirm blendshapes appear
-
-This gets us a working visual feedback loop with zero code changes.
-
-### Phase 2: Web renderer in React frontend (future plan)
-
-Add a VRM avatar viewer to the existing React frontend. Architecture:
-
-```
-Python backend → WebSocket → React frontend → three-vrm renderer
-                                              ↓
-                                         VRM avatar with blendshapes
-```
-
-This eliminates the third-party app dependency entirely. The frontend already exists and connects to the backend via WebSocket. Adding three-vrm is a natural extension.
-
-**Scope for Phase 2:**
-- VRM 0.x model loading via `@pixiv/three-vrm`
-- Blendshape application from WebSocket data (blink, clench, focus, relaxation)
-- Head rotation from IMU quaternion data
-- OBS-compatible transparent background (CSS `background: transparent` + OBS browser source)
-- Simple UI: model selector, parameter sliders for tuning
-
-**Not in scope (YAGNI):**
-- VRM 1.x support (add when needed)
-- Hand tracking
-- Physics customization
-- Scene editor
+| Priority | What | Reaches |
+|----------|------|---------|
+| **P0** | Warudo as primary VMC target | 860+ concurrent 3D VRM users |
+| **P1** | VTube Studio plugin (Plan 5) | 10K+ Live2D users |
+| **P2** | VRChat OSC output (Plan 4) | VRChat social VTubers |
+| **P3** | Own web renderer (someday) | Linux users, our own frontend |
 
 ## Impact on Existing Plans
 
-- **Plans 2-5 (VMC, VRChat OSC, VTube Studio):** Unchanged. These output protocols target third-party apps and remain valuable for users who prefer them.
-- **Phase 1 (Wine setup guide):** New deliverable, documentation only, no code.
-- **Phase 2 (web renderer):** New plan needed. Would become Plan 6 or a new tier.
-
-## Decision Summary
-
-| Question | Answer |
-|----------|--------|
-| Fork VSeeFace? | No — closed source, legally impossible |
-| Use Wine? | Yes — for dev/testing, with documented setup |
-| Pivot away? | Partially — keep VMC output for third-party apps, build own web renderer long-term |
-| Build Godot renderer? | No — YAGNI, wrong stack |
-| Build web renderer? | Yes — future plan, leverages existing frontend |
+- **Plans 2-5:** Unchanged. VMC, VRChat OSC, VTube Studio outputs all remain valuable.
+- **Testing workflow:** Use Warudo under Proton to visually verify VMC blendshapes.
+- **Documentation:** Write Warudo setup guide for Linux dev and Windows users.

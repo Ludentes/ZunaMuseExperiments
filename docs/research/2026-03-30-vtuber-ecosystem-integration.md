@@ -127,11 +127,22 @@ This covers the 2D Live2D ecosystem (VTube Studio's 10K+ daily users).
 | **Standalone VTuber app** | Full control | Competes with established apps, no ecosystem | Very High |
 | **VMC + VTS plugin (recommended combo)** | Covers 3D + 2D ecosystems | Two codebases | Medium |
 
+## Updated Market Data (2026-03-30)
+
+Follow-up research resolved several open questions:
+
+- **2D vs 3D split:** ~59% 2D (Live2D), ~32% 3D (VRM), growing at 11% CAGR. VTube Studio dominates 2D.
+- **Warudo growth:** 860 avg concurrent (+225% YoY), free for indie users. Now the clear 3D market leader, replacing VSeeFace.
+- **VSeeFace status:** Last release Feb 2025 (not Feb 2023 as initially thought). Users actively migrating to Warudo/VNyan.
+- **Warudo pricing:** Free on Steam for all indie VTubers. Pro (enterprise) is contact-only pricing.
+- **Linux VTuber market:** Tiny niche. "Awesome VTubing on Linux" has 7 GitHub stars. Most Linux VTubers use Proton.
+- **Web-based VMC receiver:** No demand. No existing tool combines three-vrm + external tracking input. Every web VTuber app uses built-in MediaPipe only.
+
+**Primary target changed from VSeeFace to Warudo.** See `docs/superpowers/specs/2026-03-30-vseeface-linux-strategy-design.md` for full strategy.
+
 ## Open Questions
 
-- What percentage of VTubers use 3D (VRM) vs 2D (Live2D)? Steam data only covers VTube Studio and Warudo; VSeeFace and VNyan have no public user counts. The 2D/Live2D market appears larger based on VTube Studio's 10K+ daily users vs Warudo's ~500.
 - How many VTubers would buy EEG hardware specifically for VTubing? The Muse 2 costs ~$250. BrainFlowsIntoVRChat's 325 stars suggests interest but not mass adoption. The value proposition may be stronger for existing Muse owners who also VTube.
-- VTube Studio's plugin API documentation on parameter injection rate limits and value ranges needs verification from the full API spec (the wiki page was incomplete).
 - VMC protocol support for custom/non-standard blendshape names (e.g., `eeg_focus`, `eeg_relaxation`) — will receivers pass these through to VRM models, or only standard ARKit/VRM blendshapes?
 - VNyan's OSC receiver accepts VRChat-format parameters natively since v1.3.2, but whether it handles arbitrary OSC addresses or only the VRChat parameter namespace is unclear.
 
