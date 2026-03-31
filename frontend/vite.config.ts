@@ -15,6 +15,19 @@ const config = defineConfig({
     tanstackStart({ spa: { enabled: true } }),
     viteReact(),
   ],
+  server: {
+    watch: {
+      ignored: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/recordings/**',
+        '**/experiments/**',
+        '**/__pycache__/**',
+        '**/backend/**',
+        '**/docs/**',
+      ],
+    },
+  },
 })
 
 export default config
