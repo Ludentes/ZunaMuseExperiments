@@ -304,7 +304,41 @@ Setting up 3–5 reaction expressions (happy, annoyed, surprised, embarrassed) m
 
 ---
 
-## Part 8: Adding Muse EEG on Top
+## Part 8: VTS Visual Effects
+
+VTube Studio has a built-in Visual Effects system (Windows/macOS only) that can be driven by any parameter — including the Muse custom parameters. Effects are applied inside VTS before output to OBS via Spout2 or virtual camera.
+
+### Enable Visual Effects
+
+Go to **Settings → Visual Effects**. The panel shows all available effect slots with on/off toggles and parameter bindings.
+
+Built-in effects include: bloom/glow, lens distortion, particles, color overlay, and lighting effects. Each effect exposes one or more intensity knobs that can be bound to a tracking parameter.
+
+### Binding a parameter to an effect
+
+For each effect in the Visual Effects panel:
+1. Enable the effect
+2. Click the parameter binding slot next to the intensity control
+3. Select the parameter to drive it — any tracking parameter, expression parameter, or custom injected parameter works
+
+### Useful mappings for Muse signals
+
+| Effect | Parameter | Result |
+|--------|-----------|--------|
+| Bloom/glow intensity | `MuseRelaxation` | Soft glow builds as you relax |
+| Color overlay opacity | `MuseFocus` | Subtle tint intensifies with concentration |
+| Particle emission rate | `MuseClench` | Burst on jaw clench |
+| Lens distortion | `MuseRelaxation` inverted | Sharpens when alert, softens when relaxed |
+
+Because these are driven by injected parameters, they respond to live Muse data with no hotkey needed.
+
+### Linux note
+
+Visual Effects require the Windows/macOS VTS build. Under Linux/Proton, the Visual Effects panel may not appear or effects may not render. Test first — if unavailable, use the OBS color-correction filter approach instead (see `docs/research/2026-04-03-biometric-streaming-overlays.md`).
+
+---
+
+## Part 9: Adding Muse EEG on Top
 
 Once your basic VTuber setup is working, you can add the Muse 2 EEG bridge.
 
