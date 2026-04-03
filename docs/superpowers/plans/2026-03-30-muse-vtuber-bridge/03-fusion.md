@@ -1,6 +1,12 @@
 # Plan 3: Fusion — OpenSeeFace + IMU Complementary Filter
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **STATUS: DEPRECATED (2026-04-03)**
+>
+> This plan is shelved indefinitely. The primary target is VTube Studio, which already has its own webcam face tracking. Adding OpenSeeFace fusion would only benefit non-VTS targets (VMC/VRChat), and the VTS plugin API supports per-parameter weight blending that already lets users mix IMU and camera tracking without OpenSeeFace.
+>
+> Reconsidering only if: (a) VMC-only users become a significant audience, or (b) VTS's built-in tracking is insufficient for a specific use case.
+
+> **For agentic workers:** Do NOT implement this plan. It is deprecated.
 
 **Goal:** Consume OpenSeeFace UDP output as absolute webcam reference, fuse with IMU via quaternion complementary filter. Better tracking than either source alone.
 

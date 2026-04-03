@@ -1,5 +1,11 @@
 # Plan 4: VRChat OSC Output (BFiVRC Compatible)
 
+> **STATUS: DEFERRED (2026-04-03)**
+>
+> VRChat OSC targets a different audience than VTube Studio (social VR vs VTubers). With VTS as the primary target, this is a secondary output for a separate use case. Defer until VTS experience is solid. Reconsider if VNyan users become a meaningful audience (VNyan accepts VRChat OSC since v1.3.2).
+>
+> Implementation is fully specced and ~2-3h of work when ready.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Output EEG metrics as VRChat-compatible OSC parameters on port 9000. Compatible with BrainFlowsIntoVRChat avatar prefabs. Also works with VNyan (accepts VRChat OSC since v1.3.2).
