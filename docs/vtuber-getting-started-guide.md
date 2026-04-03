@@ -340,10 +340,35 @@ Set the Pose slider to 0.0 and Eye slider to 0.0 (camera/iPhone wins for head tr
 
 ## Quick Reference: Files and Paths
 
+Steam via Flatpak (this machine):
+```
+~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/
+```
+
+Native Steam install:
+```
+~/.steam/steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/
+```
+
+| What | Relative to StreamingAssets/ |
+|------|------------------------------|
+| VTS Live2D models folder | `Live2DModels/` |
+| VTS OpenSeeFace config | `ip.txt` |
+
+**Bundled sample models** (already in `Live2DModels/`, no download needed):
+
+| Model | Quality | Notes |
+|-------|---------|-------|
+| `hiyori_vts` | ✓ Best | Physics, full params — use this for testing |
+| `akari_vts` | ✓ Good | Expressions folder pre-configured |
+| `hijiki_vts` | OK | Simple, no physics |
+| `tororo_vts` | OK | Simple, no physics |
+| `wanko_vts` | OK | Simple, no physics |
+
 | What | Path |
 |------|------|
-| VTS Live2D models folder | `~/.steam/steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/Live2DModels/` |
-| VTS OpenSeeFace config | `~/.steam/steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/ip.txt` |
+| Muse VTuber auth token | `~/.config/muse-vtuber/vts_token.txt` |
+| VTS OpenSeeFace config | See StreamingAssets path above + `ip.txt` |
 | Muse VTuber auth token | `~/.config/muse-vtuber/vts_token.txt` |
 | Setup UI (when backend is running) | `http://localhost:5173` |
 
