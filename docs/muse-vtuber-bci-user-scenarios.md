@@ -29,6 +29,14 @@ Thresholds for nod/shake: gyro_pitch > 40 deg/s (nod), gyro_yaw > 100 deg/s (sha
 | Relaxation | `MuseRelaxation` | 70–80%, ~38% non-responders | 2–5s | alpha power, unsigned 0–1 |
 | Head pose | `FaceAngleX/Y/Z` | Mediocre yaw range (±10–15°) | ~100ms | IMU Madgwick filter, yaw decays without magnetometer |
 
+### Speech presence (easy win, SpeechDetector already exists)
+
+| Signal | VTS Param | Reliability | Notes |
+|--------|-----------|-------------|-------|
+| Speaking flag | `MuseSpeaking` | ~90% | Inverse of VoiceSilence. Useful when mic off or to gate EEG signals |
+
+The SpeechDetector stage already runs in the pipeline (guards blink/clench from speech artifacts). Exposing it as `MuseSpeaking` (0 = silent, 1 = speaking) requires only adding a parameter injection call. Fills the lipsync gap when mic is disabled.
+
 ### Physiological (not yet implemented)
 
 | Signal | VTS Param | Reliability | Notes |
@@ -172,13 +180,26 @@ A future improvement: our plugin could call the VTS `TriggerHotkey` API directly
 
 ---
 
+## Lip Sync Interaction
+
+VTS Advanced Lipsync (microphone MFCC) handles vowel animation independently. Our signals run alongside it. Critical rules:
+
+- **Never bind Muse params to `MouthOpen` or `VoiceA`–`VoiceO`** — that's VTS's territory
+- **`MuseClench` fills the one genuine lip sync gap**: jaw clenching (contraction) vs jaw opening — ARKit `Jaw Open` can't distinguish resting-closed from actively-clenched. Our EMG-based detector can.
+- **`MuseSpeaking` complements `VoiceSilence`**: when mic is disabled, `VoiceSilence` stays at 1 (frozen mouth). `MuseSpeaking` from EEG can unlock mouth animation without a mic.
+
+See `docs/research/2026-04-03-vtube-studio-lip-sync.md` for the full lip sync ecosystem analysis.
+
+---
+
 ## Open Feature Gaps
 
 | Gap | Impact | Effort |
 |----|--------|--------|
-| Port NodDetector | Adds 2 new commands | Low — copy from parent |
-| Upgrade BlinkDetector (single/double) | Adds double-blink command | Low — copy from parent |
-| PPG heartbeat pipeline | Enables Scenario D | Medium |
-| Plugin-side hotkey triggering | Eliminates Streamer.bot dependency for pulse params | Medium |
-| Sustained clench (held state) | Held expression possible | Low — extend ClenchDetector |
+| Expose `MuseSpeaking` from SpeechDetector | Lipsync without mic; gate EEG signals | Very low — already detected, just inject |
+| Port NodDetector | Adds 2 new commands (nod_yes, nod_no) | Low — copy from parent project |
+| Upgrade BlinkDetector (single/double) | Adds double-blink as separate command | Low — copy from parent project |
+| Plugin-side hotkey triggering via VTS API | Eliminates Streamer.bot dependency for pulse params | Medium |
+| PPG heartbeat pipeline | Enables Scenario D (heartbeat VTuber) | Medium — needs ANCILLARY_PRESET polling |
+| Sustained clench (held state) | Held expression, not just pulse | Low — extend ClenchDetector |
 | Signed Focus/Relax | Direction above/below baseline | Low — expose from FocusRelaxStage |

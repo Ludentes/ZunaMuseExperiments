@@ -151,6 +151,28 @@ Adjust until head movements feel natural on your avatar.
 
 ---
 
+## Step 7: Lip Sync Co-existence
+
+VTube Studio's **Advanced Lipsync** (microphone MFCC) handles vowel animation — A/I/U/E/O confidence scores plus volume and frequency. Our plugin works **alongside** it without conflict, as long as you follow one rule:
+
+**Do not bind any Muse parameter to `MouthOpen`, `VoiceA`–`VoiceO`, or `VoiceVolume`.** VTS owns the mouth during speech. Our signals go to separate parameters (expressions, eyebrows, glow effects).
+
+### What Muse adds that lipsync can't
+
+The one genuine gap in VTS lipsync — including iPhone ARKit — is **jaw clench**. The `Jaw Open` ARKit blendshape detects jaw *separation* (opening); it cannot distinguish resting-closed from actively-clenched. EEG EMG artifact from temporal muscles is the only signal that fires positively on clench. `MuseClench` fills this gap directly.
+
+**Do not bind `MuseClench` to `MouthOpen`** — that conflicts with VTS's lipsync. Instead bind it to an intensity/anger expression parameter.
+
+### MuseSpeaking (planned)
+
+A future parameter `MuseSpeaking` will expose the existing EEG speech detector as a VTS parameter (0 = silent, 1 = speaking). This is useful when:
+- Microphone lipsync is disabled but you still want the model's mouth to respond to speech
+- You want to gate other EEG signals (suppress Focus/Relax changes while speaking)
+
+Until then: if you use VTS Advanced Lipsync, `VoiceSilence` already handles mouth mode switching automatically.
+
+---
+
 ## Complete parameter reference
 
 | VTS Parameter | Type | Source | What to bind it to |
